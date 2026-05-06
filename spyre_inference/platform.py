@@ -1,4 +1,3 @@
-import os
 import torch
 import sys
 from typing import TYPE_CHECKING
@@ -47,15 +46,10 @@ class TorchSpyrePlatform(CpuPlatform):
     dispatch_key: str = "CPU"
 
     # Register the PyTorch Native Attention implementation as the CUSTOM backend
-    _SPYRE_ATTN_IMPL = os.environ.get("SPYRE_ATTN_IMPL", "default")
-
-    if _SPYRE_ATTN_IMPL == "exp":
-        _backend_path = "spyre_inference.v1.attention.backends.spyre_attn_exp.SpyreAttentionBackend"
-    else:
-        _backend_path = "spyre_inference.v1.attention.backends.spyre_attn.SpyreAttentionBackend"
-
-    register_backend(AttentionBackendEnum.CUSTOM, _backend_path)
-
+    register_backend(
+        AttentionBackendEnum.CUSTOM,
+        "spyre_inference.v1.attention.backends.spyre_attn.SpyreAttentionBackend",
+    )
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
