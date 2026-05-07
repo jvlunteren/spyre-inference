@@ -59,6 +59,24 @@ KV_LENGTH_ALIGNMENT = 256
 QUERY_CHUNK_SIZE = 32
 
 
+def _maybe_compile(fn):
+    """Compile fn unless vLLM's compilation config disables it.
+
+    Mirrors the gating in CustomOp.maybe_compile without requiring CustomOp
+    inheritance: returns fn unchanged when compilation mode is NONE or the
+    backend is "eager", otherwise wraps it with torch.compile.
+    """
+    from vllm.config import get_cached_compilation_config
+    from vllm.config.compilation import CompilationMode
+
+    cfg = get_cached_compilation_config()
+    if cfg.mode == CompilationMode.NONE:
+        return fn
+    if cfg.backend == "eager":
+        return fn
+    return torch.compile(fn, dynamic=False)
+
+
 # --- Scatter: values built on CPU, then transferred to Spyre ---
 # Tokens land at different block rows and column offsets, requiring
 # advanced indexing to construct the values tensor (not supported on Spyre).
@@ -444,6 +462,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         self._target_device = torch.device("spyre")
         self._target_dtype = torch.float16
 
+        self._attn_4d = _maybe_compile(_attn_4d)
+
         self._block_size: int | None = None
         self._num_blocks: int | None = None
         self._aligned_num_physical_blocks: int | None = None
@@ -617,7 +637,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         q_spyre = convert(q, self._target_device, self._target_dtype)
 
-        output_spyre = _attn_4d(q_spyre, k, v, self.scale, mask)
+        output_spyre = self._attn_4d(q_spyre, k, v, self.scale, mask)
 
         output_4d = convert(output_spyre, output_device, output_dtype)
         output_reshaped = output_4d.reshape(num_seqs, num_heads, padded_query_len, head_size)
