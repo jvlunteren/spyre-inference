@@ -153,7 +153,9 @@ class TorchSpyrePlatform(CpuPlatform):
         if current != required_value:
             logger.warning(
                 "Spyre requires %s=%s; overriding user value %s",
-                attr, required_value, current,
+                attr,
+                required_value,
+                current,
             )
             setattr(config_obj, attr, required_value)
 

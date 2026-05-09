@@ -152,10 +152,10 @@ def ref_attn(
 @pytest.mark.parametrize(
     "seq_lens",
     [
-        pytest.param([(1, 1024)],  id="decode(q=1,kv=1024)"),
-        pytest.param([(1, 256)],   id="decode(q=1,kv=256)"),
-        pytest.param([(32, 256)],  id="prefill(q=32,kv=256)"),
-        pytest.param([(64, 512)],  id="prefill(q=64,kv=512)"),
+        pytest.param([(1, 1024)], id="decode(q=1,kv=1024)"),
+        pytest.param([(1, 256)], id="decode(q=1,kv=256)"),
+        pytest.param([(32, 256)], id="prefill(q=32,kv=256)"),
+        pytest.param([(64, 512)], id="prefill(q=64,kv=512)"),
         pytest.param([(100, 512)], id="prefill(q=100,kv=512)"),
     ],
 )
@@ -164,11 +164,13 @@ def ref_attn(
     [
         pytest.param((32, 8), id="GQA"),
         pytest.param(
-            (32, 32), id="MHA",
+            (32, 32),
+            id="MHA",
             marks=pytest.mark.skip(reason="Spyre compilation fails for MHA head config"),
         ),
         pytest.param(
-            (32, 1), id="MQA",
+            (32, 1),
+            id="MQA",
             marks=pytest.mark.skip(reason="Spyre compilation fails for MQA head config"),
         ),
     ],
