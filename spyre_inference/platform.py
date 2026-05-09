@@ -65,6 +65,17 @@ class TorchSpyrePlatform(CpuPlatform):
         "spyre_inference.v1.attention.backends.spyre_attn.SpyreAttentionBackend",
     )
 
+    # Spyre bring-up capacity/shape constraints.
+    # num_gpu_blocks_override=64 × block_size=16 = 1024 tokens = max_model_len,
+    # and 64 is stick-aligned (P_PAD) so there is no padding waste.
+    #
+    # NOTE: These are a TEMPORARY settings override required to run the current
+    # on-device paged KV cache implementation on Spyre. They will be removed
+    # once more advanced tensor indexing becomes available on Spyre.
+    _SPYRE_MAX_NUM_SEQS = 1
+    _SPYRE_MAX_MODEL_LEN = 1024
+    _SPYRE_NUM_GPU_BLOCKS = 64
+
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "torch-spyre"
@@ -122,6 +133,29 @@ class TorchSpyrePlatform(CpuPlatform):
         # require setting the dtype.
         vllm_config.model_config.dtype = torch.float16
 
+        # Spyre bring-up capacity/shape defaults. These match the kernel's
+        # current P_PAD alignment and KV budget; they are overwritten (with a
+        # warning) in check_and_update_config if the user passed different
+        # values.
+        #
+        # NOTE: This is a TEMPORARY settings override required to run the
+        # current on-device paged KV cache implementation on Spyre. It will be
+        # removed once more advanced tensor indexing becomes available on
+        # Spyre.
+        vllm_config.scheduler_config.max_num_seqs = cls._SPYRE_MAX_NUM_SEQS
+        vllm_config.model_config.max_model_len = cls._SPYRE_MAX_MODEL_LEN
+        vllm_config.cache_config.num_gpu_blocks_override = cls._SPYRE_NUM_GPU_BLOCKS
+
+    @staticmethod
+    def _enforce_spyre_value(config_obj, attr: str, required_value) -> None:
+        current = getattr(config_obj, attr, None)
+        if current != required_value:
+            logger.warning(
+                "Spyre requires %s=%s; overriding user value %s",
+                attr, required_value, current,
+            )
+            setattr(config_obj, attr, required_value)
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, *args, **kwargs) -> str:
         if selected_backend == AttentionBackendEnum.CUSTOM:
@@ -140,6 +174,20 @@ class TorchSpyrePlatform(CpuPlatform):
                 f"The model dtype needs to be torch.float16 for spyre, "
                 f"but was specified to be {vllm_config.model_config.dtype}"
             )
+
+        cls._enforce_spyre_value(
+            vllm_config.scheduler_config, "max_num_seqs", cls._SPYRE_MAX_NUM_SEQS
+        )
+        cls._enforce_spyre_value(
+            vllm_config.model_config, "max_model_len", cls._SPYRE_MAX_MODEL_LEN
+        )
+        # Scheduler mirrors max_model_len; keep it in sync.
+        cls._enforce_spyre_value(
+            vllm_config.scheduler_config, "max_model_len", cls._SPYRE_MAX_MODEL_LEN
+        )
+        cls._enforce_spyre_value(
+            vllm_config.cache_config, "num_gpu_blocks_override", cls._SPYRE_NUM_GPU_BLOCKS
+        )
 
         # ---- worker ----
         parallel_config = vllm_config.parallel_config
