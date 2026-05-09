@@ -324,4 +324,3 @@ def test_spyre_attn(
         atol, rtol = 0.2, 0.2
 
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-

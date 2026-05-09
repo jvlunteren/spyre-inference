@@ -222,5 +222,3 @@ def test_linear_oot_registration(tp_group):
     x_row = torch.randn(4, 128, dtype=torch.float16)
     out_down, _ = down(x_row)
     assert out_down.shape == (4, 64)
-
-
