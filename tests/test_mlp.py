@@ -26,7 +26,13 @@ import torch.nn.functional as F
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 256])
 @pytest.mark.parametrize("hidden_size,intermediate_size", [(64, 128), (128, 256), (512, 1024)])
 @pytest.mark.parametrize("use_bias", [False, True])
-def test_merged_column_matches_reference(tp_group, num_tokens, hidden_size, intermediate_size, use_bias):
+def test_merged_column_matches_reference(
+    tp_group,
+    num_tokens,
+    hidden_size,
+    intermediate_size,
+    use_bias
+):
     """SpyreMergedColumnParallelLinear output matches upstream CPU F.linear."""
     from vllm.model_executor.layers.linear import MergedColumnParallelLinear
     from spyre_inference.custom_ops.linear import SpyreMergedColumnParallelLinear

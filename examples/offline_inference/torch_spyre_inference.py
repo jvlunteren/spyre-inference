@@ -49,26 +49,26 @@ def parse_args():
         type=str,
         default="20,65",
         dest="max_tokens",
-        help="Comma-separated list of max tokens per prompt (cycled if shorter than num_prompts)"
+        help="Comma-separated list of max tokens per prompt (cycled if shorter than num_prompts)",
     )
     parser.add_argument(
         "--compare-with-cpu",
         action="store_true",
         dest="compare_with_cpu",
-        help="Compare results with HuggingFace CPU inference"
+        help="Compare results with HuggingFace CPU inference",
     )
     parser.add_argument(
         "--attention-backend",
         type=str,
         default=None,
         dest="attention_backend",
-        help="Attention backend to use (e.g., SPYRE, CPU)"
+        help="Attention backend to use (e.g., SPYRE, CPU)",
     )
     parser.add_argument(
         "--enforce-eager",
         action="store_true",
         dest="enforce_eager",
-        help="Skip torch.compile, run in eager mode"
+        help="Skip torch.compile, run in eager mode",
     )
     parser.add_argument(
         "--custom-ops",
