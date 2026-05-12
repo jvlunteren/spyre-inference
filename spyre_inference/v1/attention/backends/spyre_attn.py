@@ -542,6 +542,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             f"Spyre attention requires num_seqs=1, got {attn_metadata.num_seqs}"
         )
 
+        # The value still resides on CPU, as it is
+        # created in the GraniteAttention through a split
+        # operation, which has to be carried out on CPU
+        query = convert(query, device="cpu")
+        key = convert(key, device="cpu")
+
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         if self._k_cache_dev is None:
@@ -574,7 +580,20 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         )
 
         # Step 6: Extract actual tokens (num_seqs=1 → simple slice)
-        output[:num_actual_tokens].copy_(attn_output[0, :num_actual_tokens])
+        if output.device.type == "spyre":
+            # Workaround for torch-spyre bug: a CPU->Spyre `.copy_()` into a
+            # destination whose rank differs from its allocation rank (here,
+            # vLLM allocates `output` as 2-D and views it as 3-D) crashes in
+            # spyre::get_device_stride_infos. Instead, build the full output
+            # on CPU, transfer it to a freshly-allocated Spyre tensor (works),
+            # and finish with a Spyre->Spyre copy, which dispatches through
+            # torch.ops.spyre.copy_from_d2d and avoids the broken path.
+            full_cpu = torch.zeros(output.shape, dtype=output.dtype, device="cpu")
+            full_cpu[:num_actual_tokens] = attn_output[0]
+            full_spyre = convert(full_cpu.contiguous(), "spyre", output.dtype)
+            output.copy_(full_spyre)
+        else:
+            output[:num_actual_tokens].copy_(attn_output[0])
         return output
 
     def _scatter_to_device_cache(
