@@ -36,11 +36,13 @@ import os
 def parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model", type=str, default="ibm-ai-platform/micro-g3.3-8b-instruct-1b")
-    parser.add_argument("--max_model_len", "--max-model-len", type=int, default=2048)
-    parser.add_argument("--max_num_seqs", "--max-num-seqs", type=int, default=2)
-    parser.add_argument("--max_num_batched_tokens", "--max-num-batched-tokens", type=int, default=2)
+    parser.add_argument("--max-model-len", type=int, default=2048, dest="max_model_len")
+    parser.add_argument("--max-num-seqs", type=int, default=2, dest="max_num_seqs")
     parser.add_argument(
-        "--num_gpu_blocks_override", "--num-gpu-blocks-override", type=int, default=None
+        "--max-num-batched-tokens", type=int, default=2, dest="max_num_batched_tokens"
+    )
+    parser.add_argument(
+        "--num_gpu_blocks_override", type=int, default=None, dest="--num-gpu-blocks-override"
     )
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("-n", "--num-prompts", type=int, default=3, dest="num_prompts")
@@ -76,11 +78,9 @@ def parse_args():
         nargs="*",
         default=None,
         dest="custom_ops",
-        help=(
-            "Custom ops to enable (e.g., `--custom-ops +RMSNorm +SiluAndMul`). "
-            "Set `--custom-ops none` to disable all custom ops. "
-            "If not set, custom_ops is set to 'all' for both eager and compile mode."
-        ),
+        help="Custom ops to enable (e.g., `--custom-ops +RMSNorm +SiluAndMul`). \
+            Set `--custom-ops none` to disable all custom ops. \
+            If not set, custom_ops is set to 'all' for both eager and compile mode.",
     )
     return parser.parse_args()
 
