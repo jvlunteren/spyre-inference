@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import torch
 import sys
 from typing import TYPE_CHECKING
 from string import Template
 import multiprocessing
 import importlib.metadata
+
+from spyre_inference import envs
 
 
 # When running this plugin on a Mac, we assume it's for local development
@@ -62,9 +63,7 @@ class TorchSpyrePlatform(CpuPlatform):
 
     # Register the PyTorch Native Attention implementation as the CUSTOM backend.
     # SPYRE_ATTN_IMPL=exp selects spyre_attn_exp.py; anything else uses spyre_attn.py.
-    _SPYRE_ATTN_IMPL = os.environ.get("SPYRE_ATTN_IMPL", "default")
-
-    if _SPYRE_ATTN_IMPL == "exp":
+    if envs.SPYRE_ATTN_IMPL == "exp":
         _backend_path = "spyre_inference.v1.attention.backends.spyre_attn_exp.SpyreAttentionBackend"
     else:
         _backend_path = "spyre_inference.v1.attention.backends.spyre_attn.SpyreAttentionBackend"

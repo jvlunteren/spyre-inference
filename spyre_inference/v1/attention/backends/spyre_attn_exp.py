@@ -51,6 +51,7 @@ from typing import ClassVar
 
 import torch
 
+from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 
 from vllm.config import VllmConfig
@@ -619,9 +620,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         )  # [num_tokens, num_kv_heads, head_size]
         v_new_dev = value.to(self._target_dtype).to(self._target_device).contiguous()
 
-        import os as _os_ow
-
-        if _os_ow.environ.get("SPYRE_SCATTER_USE_OVERWRITE", "0") != "0":
+        if envs.SPYRE_SCATTER_USE_OVERWRITE:
             # Per-token spyre.overwrite_f path. For each token t, write
             # k_new_dev[t, :, :] (shape [num_kv_heads, head_size]) into
             # cache[:, block_indices[t], block_offsets[t]*head_size :
