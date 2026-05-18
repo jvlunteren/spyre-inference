@@ -560,6 +560,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             attn_metadata.scatter_mask_dev,
             attn_metadata.scatter_row_sel_dev,
             attn_metadata.scatter_col_sel_dev,
+            attn_metadata.slot_mapping[:num_actual_tokens],
         )
 
         # Step 2: Gather — sel_mask is precomputed by builder and lives on Spyre
@@ -603,13 +604,62 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         scatter_mask_dev: torch.Tensor,
         row_sel_dev: torch.Tensor,
         col_sel_dev: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> None:
-        """Scatter: transfer compact K/V to Spyre, place via two bmms against one-hot selectors."""
+        """Scatter: transfer compact K/V to Spyre, place via two bmms against one-hot selectors.
+
+        SPYRE_SCATTER_USE_OVERWRITE=1 selects an alternative path that
+        uses spyre.overwrite_f per token — no bmm/transpose, all on
+        device. Requires PR #2084 (specialize_int=True) applied to
+        torch-spyre or the kernel will reuse the first call's offsets.
+        """
         # Compact per-layer transfer: [num_tokens, num_kv_heads, head_size] on Spyre
         k_new_dev = (
             key.to(self._target_dtype).to(self._target_device).contiguous()
         )  # [num_tokens, num_kv_heads, head_size]
         v_new_dev = value.to(self._target_dtype).to(self._target_device).contiguous()
+
+        import os as _os_ow
+        if _os_ow.environ.get("SPYRE_SCATTER_USE_OVERWRITE", "0") != "0":
+            # Per-token spyre.overwrite_f path. For each token t, write
+            # k_new_dev[t, :, :] (shape [num_kv_heads, head_size]) into
+            # cache[:, block_indices[t], block_offsets[t]*head_size :
+            #       block_offsets[t]*head_size + head_size]
+            # via overwrite_f with dims=[1, 2], offsets=[br, cs].
+            # Input must be [num_kv_heads, 1, head_size] to match the
+            # output's rank (3D) with the listed dims being singleton.
+            head_size = self.head_size
+            block_size = self._block_size
+            assert block_size is not None
+            sm = slot_mapping.detach().to("cpu")
+            block_indices = (sm // block_size).tolist()
+            block_offsets = (sm % block_size).tolist()
+            num_tokens = k_new_dev.shape[0]
+
+            # Build per-token inputs on CPU and upload as fresh tensors.
+            # Slicing k_new_dev[t] produces a Spyre view whose device
+            # layout doesn't match what overwrite_f's bundle compiler
+            # expects (triggers patch (A)'s narrowed-view guard). A
+            # fresh CPU->Spyre upload reshapes cleanly.
+            k_cpu = key.to(self._target_dtype).contiguous()
+            v_cpu = value.to(self._target_dtype).contiguous()
+
+            k_cache = self._k_cache_dev
+            v_cache = self._v_cache_dev
+            for t in range(num_tokens):
+                br = int(block_indices[t])
+                cs = int(block_offsets[t]) * head_size
+                k_tok = k_cpu[t].unsqueeze(1).contiguous().to(self._target_device)
+                v_tok = v_cpu[t].unsqueeze(1).contiguous().to(self._target_device)
+                k_cache = torch.ops.spyre.overwrite_f(
+                    input=k_tok, output=k_cache, dims=[1, 2], offsets=[br, cs]
+                )
+                v_cache = torch.ops.spyre.overwrite_f(
+                    input=v_tok, output=v_cache, dims=[1, 2], offsets=[br, cs]
+                )
+            self._k_cache_dev = k_cache
+            self._v_cache_dev = v_cache
+            return
 
         # bmm 1: place each token's head_size-vector into its block-width slot.
         # [num_tokens, num_kv_heads, head_size] @ [num_tokens, head_size, block_width]
