@@ -620,6 +620,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         v_new_dev = value.to(self._target_dtype).to(self._target_device).contiguous()
 
         import os as _os_ow
+
         if _os_ow.environ.get("SPYRE_SCATTER_USE_OVERWRITE", "0") != "0":
             # Per-token spyre.overwrite_f path. For each token t, write
             # k_new_dev[t, :, :] (shape [num_kv_heads, head_size]) into
