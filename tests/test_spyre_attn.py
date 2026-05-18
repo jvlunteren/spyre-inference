@@ -163,16 +163,8 @@ def ref_attn(
     "num_heads",
     [
         pytest.param((32, 8), id="GQA"),
-        pytest.param(
-            (32, 32),
-            id="MHA",
-            marks=pytest.mark.skip(reason="Spyre compilation fails for MHA head config"),
-        ),
-        pytest.param(
-            (32, 1),
-            id="MQA",
-            marks=pytest.mark.skip(reason="Spyre compilation fails for MQA head config"),
-        ),
+        pytest.param((32, 32), id="MHA"),
+        pytest.param((32, 1), id="MQA"),
     ],
 )
 @pytest.mark.parametrize(
