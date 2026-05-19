@@ -132,7 +132,7 @@ SEQ_LEN_KV = 256
 Q_TILE_SIZE = 32
 KV_TILE_SIZE = 64
 
-SCALE = 1.0 / (HEAD_SIZE ** 0.5)
+SCALE = 1.0 / (HEAD_SIZE**0.5)
 
 # fp16 tolerance for end-to-end attention vs fp32 reference
 FP16_TOL = 1e-2
@@ -140,6 +140,7 @@ FP16_TOL = 1e-2
 # ---------------------------------------------------------------------------
 # Spyre workarounds
 # ---------------------------------------------------------------------------
+
 
 def _seq_slice(t: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
     """Slice a tensor along dim 1 (sequence dim).
@@ -166,6 +167,7 @@ def _elemwise_max(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Fused Tiled Attention
 # ---------------------------------------------------------------------------
+
 
 def fused_tiled_attention(
     query: torch.Tensor,
@@ -210,7 +212,9 @@ def fused_tiled_attention(
 
         tile_max = None  # initialized on the first KV iteration
         tile_sum = torch.zeros(
-            (num_heads, q_tile_len, 1), dtype=query.dtype, device=query.device,
+            (num_heads, q_tile_len, 1),
+            dtype=query.dtype,
+            device=query.device,
         )
         tile_output = torch.zeros(
             (num_heads, q_tile_len, head_size),
@@ -275,7 +279,12 @@ reference_output = standard_attention(query_cpu, key_cpu, value_cpu, SCALE)
 
 print(f"Computing fused tiled attention (Q_tile={Q_TILE_SIZE}, KV_tile={KV_TILE_SIZE}, CPU)...")
 fused_output_cpu = fused_tiled_attention(
-    query_cpu, key_cpu, value_cpu, SCALE, Q_TILE_SIZE, KV_TILE_SIZE,
+    query_cpu,
+    key_cpu,
+    value_cpu,
+    SCALE,
+    Q_TILE_SIZE,
+    KV_TILE_SIZE,
 )
 
 max_diff_cpu = torch.max(torch.abs(reference_output - fused_output_cpu)).item()
@@ -283,8 +292,11 @@ mean_diff_cpu = torch.mean(torch.abs(reference_output - fused_output_cpu)).item(
 print("\nCPU Validation:")
 print(f"  Max difference:  {max_diff_cpu:.2e}")
 print(f"  Mean difference: {mean_diff_cpu:.2e}")
-print("  Matches reference!" if max_diff_cpu < 1e-5
-      else f"  Differs from reference (max_diff={max_diff_cpu:.2e})")
+print(
+    "  Matches reference!"
+    if max_diff_cpu < 1e-5
+    else f"  Differs from reference (max_diff={max_diff_cpu:.2e})"
+)
 
 # ---------------------------------------------------------------------------
 # Spyre run
@@ -337,7 +349,12 @@ print(
 )
 try:
     fused_output_spyre = fused_tiled_attention(
-        query_spyre, key_spyre, value_spyre, SCALE, Q_TILE_SIZE, KV_TILE_SIZE,
+        query_spyre,
+        key_spyre,
+        value_spyre,
+        SCALE,
+        Q_TILE_SIZE,
+        KV_TILE_SIZE,
     )
     fused_output_spyre_cpu = fused_output_spyre.cpu().to(dtype=torch.float32)
 
