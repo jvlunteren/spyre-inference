@@ -89,11 +89,11 @@ print("\nDetecting Spyre operation support...")
 
 def _probe_operation(op_name: str, test_fn) -> bool:
     """Probe if an operation works on Spyre.
-    
+
     Args:
         op_name: Human-readable operation name for display
         test_fn: Callable that performs the operation test
-        
+
     Returns:
         True if operation is supported, False otherwise
     """
@@ -300,7 +300,7 @@ def fused_tiled_attention(
                 tile_sum = tile_sum + tile_probs.sum(dim=-1, keepdim=True)
 
         final_tile = tile_output / tile_sum
-        
+
         # Workaround for destination-side narrowed-view write bug on Spyre
         if query.device.type == "spyre":
             # Write via CPU to avoid corrupted narrowed-view writes
