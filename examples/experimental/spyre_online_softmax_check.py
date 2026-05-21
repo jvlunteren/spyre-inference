@@ -39,16 +39,18 @@ Online Softmax Algorithm (per query tile):
     Normalize: output = output / sum
 
 OPERATION DETECTION
-    The detection probe runs torch.maximum() on Spyre once and inspects the
-    error. If the probe surfaces an InductorError ("UnimplementedOp"), the
-    hybrid path runs torch.maximum on CPU via host round-trips.
+    At startup, the script probes multiple operations on Spyre to detect runtime
+    support. For torch.maximum(), if the probe detects it is not supported (e.g.,
+    InductorError with "UnimplementedOp"), the hybrid path automatically routes
+    torch.maximum calls through CPU via host round-trips.
 
     Manual override via environment variable (optional):
         SPYRE_ONLINE_SOFTMAX_ALLOW_CPU_FALLBACK=0/1
 
 KNOWN SPYRE BUGS THIS SCRIPT WORKS AROUND
-    1. torch.maximum() — recognized by the Spyre compiler but fails inductor
-       codegen with 'UnimplementedOp'. Hybrid path performs the op on CPU.
+    1. torch.maximum() — May be recognized by the Spyre compiler but can fail
+       inductor codegen with 'UnimplementedOp'. When detected as unsupported,
+       the hybrid path automatically performs the op on CPU.
     2. Seq-dim narrowed-view reads — slicing a Spyre tensor along the seq
        dimension at a non-zero offset (e.g. q[:, 32:64, :]) produces wrong
        data when consumed by bmm. .clone() and .contiguous() on the device
@@ -83,20 +85,71 @@ print("=" * 60)
 print("\nDetecting Spyre operation support...")
 
 
-def _probe_torch_maximum() -> bool:
-    """Return True iff torch.maximum() works on Spyre."""
-    a = torch.tensor([[1.0, 2.0]], dtype=torch.float16, device=DEVICE)
-    b = torch.tensor([[1.5, 1.0]], dtype=torch.float16, device=DEVICE)
+def _probe_operation(op_name: str, test_fn) -> bool:
+    """Probe if an operation works on Spyre.
+    
+    Args:
+        op_name: Human-readable operation name for display
+        test_fn: Callable that performs the operation test
+        
+    Returns:
+        True if operation is supported, False otherwise
+    """
     try:
-        torch.maximum(a, b).cpu()
-        print("  ✅ torch.maximum() — Supported")
+        test_fn()
+        print(f"  {op_name} — Supported")
         return True
     except Exception as e:
-        print(f"  torch.maximum() — Not supported: {type(e).__name__}")
+        print(f"  {op_name} — Not supported: {type(e).__name__}")
         return False
 
 
-MAXIMUM_SUPPORTED = _probe_torch_maximum()
+def _test_torch_maximum():
+    """Test torch.maximum() on Spyre."""
+    a = torch.tensor([[1.0, 2.0]], dtype=torch.float16, device=DEVICE)
+    b = torch.tensor([[1.5, 1.0]], dtype=torch.float16, device=DEVICE)
+    torch.maximum(a, b).cpu()
+
+
+def _test_bmm():
+    """Test torch.bmm() on Spyre."""
+    a = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    b = torch.randn(2, 4, 5, dtype=torch.float16, device=DEVICE)
+    torch.bmm(a, b).cpu()
+
+
+def _test_exp():
+    """Test torch.exp() on Spyre."""
+    a = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    torch.exp(a).cpu()
+
+
+def _test_max_reduction():
+    """Test torch.max(dim=-1) on Spyre."""
+    a = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    a.max(dim=-1, keepdim=True)[0].cpu()
+
+
+def _test_sum_reduction():
+    """Test torch.sum(dim=-1) on Spyre."""
+    a = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    a.sum(dim=-1, keepdim=True).cpu()
+
+
+def _test_arithmetic():
+    """Test basic arithmetic (mul, add, sub, div) on Spyre."""
+    a = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    b = torch.randn(2, 3, 4, dtype=torch.float16, device=DEVICE)
+    ((a * b + a - b) / (b + 1e-6)).cpu()
+
+
+# Probe all operations
+MAXIMUM_SUPPORTED = _probe_operation("torch.maximum()", _test_torch_maximum)
+BMM_SUPPORTED = _probe_operation("torch.bmm()", _test_bmm)
+EXP_SUPPORTED = _probe_operation("torch.exp()", _test_exp)
+MAX_REDUCTION_SUPPORTED = _probe_operation("torch.max(dim=-1)", _test_max_reduction)
+SUM_REDUCTION_SUPPORTED = _probe_operation("torch.sum(dim=-1)", _test_sum_reduction)
+ARITHMETIC_SUPPORTED = _probe_operation("arithmetic (mul, add, sub, div)", _test_arithmetic)
 
 ALLOW_CPU_FALLBACK = not MAXIMUM_SUPPORTED
 override = os.environ.get("SPYRE_ONLINE_SOFTMAX_ALLOW_CPU_FALLBACK")
@@ -378,7 +431,46 @@ print("\n" + "=" * 60)
 print("Test Complete")
 print("=" * 60)
 print("Spyre operation support summary:")
-print("  Supported: bmm, mul, add, sub, div, exp, sum(dim=-1), max(dim=-1)")
-print("  Blocker:   torch.maximum (UnimplementedOp at codegen)")
-print("  Blocker:   seq-dim narrowed-view reads on Spyre (bmm yields garbage)")
-print("                workaround: slice on host then transfer (_seq_slice)")
+
+# Dynamically report supported operations
+supported_ops = []
+if BMM_SUPPORTED:
+    supported_ops.append("bmm")
+if ARITHMETIC_SUPPORTED:
+    supported_ops.extend(["mul", "add", "sub", "div"])
+if EXP_SUPPORTED:
+    supported_ops.append("exp")
+if SUM_REDUCTION_SUPPORTED:
+    supported_ops.append("sum(dim=-1)")
+if MAX_REDUCTION_SUPPORTED:
+    supported_ops.append("max(dim=-1)")
+
+if supported_ops:
+    print(f"  Supported: {', '.join(supported_ops)}")
+else:
+    print("  Supported: (none detected)")
+
+# Dynamically report unsupported operations
+unsupported_ops = []
+if not MAXIMUM_SUPPORTED:
+    unsupported_ops.append("torch.maximum")
+if not BMM_SUPPORTED:
+    unsupported_ops.append("bmm")
+if not EXP_SUPPORTED:
+    unsupported_ops.append("exp")
+if not MAX_REDUCTION_SUPPORTED:
+    unsupported_ops.append("max(dim=-1)")
+if not SUM_REDUCTION_SUPPORTED:
+    unsupported_ops.append("sum(dim=-1)")
+if not ARITHMETIC_SUPPORTED:
+    unsupported_ops.append("arithmetic")
+
+if unsupported_ops:
+    print(f"  Not supported: {', '.join(unsupported_ops)}")
+else:
+    print("  Not supported: (none detected)")
+
+# Known bugs/workarounds
+print("\n  Known bugs requiring workarounds:")
+print("    - seq-dim narrowed-view reads on Spyre (bmm yields garbage)")
+print("      workaround: slice on host then transfer (_seq_slice)")
