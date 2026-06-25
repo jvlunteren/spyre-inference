@@ -21,12 +21,6 @@ import torch
 
 from spyre_inference.custom_ops.utils import convert
 
-# When False, uses plain softmax without per-tile max shift: eliminates the aten::argmax
-# CPU fallback and the rescaling ops on every page beyond the first. Numerically unstable
-# for large score magnitudes. When True, uses the numerically stable online softmax with
-# per-tile max (requires a CPU round-trip via aten::argmax on every page).
-_NUM_STABLE_SOFTMAX = True
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.config.cache import CacheDType
@@ -44,6 +38,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+# When False, uses plain softmax without per-tile max shift: eliminates the aten::argmax
+# CPU fallback and the rescaling ops on every page beyond the first. Numerically unstable
+# for large score magnitudes. When True, uses the numerically stable online softmax with
+# per-tile max (requires a CPU round-trip via aten::argmax on every page).
+_NUM_STABLE_SOFTMAX = True
 
 # TODO: Make these hyperparameters configurable
 # KV length alignment: KV tensors are padded to the next multiple of this value.
