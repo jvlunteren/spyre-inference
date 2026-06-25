@@ -21,10 +21,6 @@ import torch
 
 from spyre_inference.custom_ops.utils import convert
 
-# When True, wraps _create_compilable_page_attn with torch.compile(dynamic=False) directly.
-# When False (default), uses _maybe_compile which is a no-op on Spyre (CompilationMode.NONE).
-_FORCE_COMPILE_ATTN = False
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.config.cache import CacheDType
@@ -42,6 +38,10 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+# When True, wraps _create_compilable_page_attn with torch.compile(dynamic=False) directly.
+# When False (default), uses _maybe_compile which is a no-op on Spyre (CompilationMode.NONE).
+_FORCE_COMPILE_ATTN = False
 
 # TODO: Make these hyperparameters configurable
 # KV length alignment: KV tensors are padded to the next multiple of this value.
