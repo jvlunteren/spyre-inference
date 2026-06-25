@@ -23,9 +23,6 @@ import torch
 
 from spyre_inference.custom_ops.utils import convert
 
-# When set, wraps forward(), reshape_and_cache(), and online_softmax() in record_function spans.
-_ATTN_PROFILING = False
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.config.cache import CacheDType
@@ -43,6 +40,9 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+# When set, wraps forward(), reshape_and_cache(), and online_softmax() in record_function spans.
+_ATTN_PROFILING = False
 
 # TODO: Make these hyperparameters configurable
 # KV length alignment: KV tensors are padded to the next multiple of this value.
