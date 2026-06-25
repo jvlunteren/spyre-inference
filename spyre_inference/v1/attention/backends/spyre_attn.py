@@ -25,6 +25,11 @@ from spyre_inference.custom_ops.utils import convert
 
 # When set, wraps forward(), reshape_and_cache(), and online_softmax() in record_function spans.
 _ATTN_PROFILING = False
+# When False, uses plain softmax without per-tile max shift: eliminates the aten::argmax
+# CPU fallback and the rescaling ops on every page beyond the first. Numerically unstable
+# for large score magnitudes. When True, uses the numerically stable online softmax with
+# per-tile max (requires a CPU round-trip via aten::argmax on every page).
+_NUM_STABLE_SOFTMAX = True
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -254,32 +259,44 @@ def _create_compilable_page_attn(num_blocks: int, padded_query_len: int):
             )
             scores *= scale
             scores = scores + mask_tile
-            scores_max = scores.max(dim=-1, keepdim=True)[0]
-
-            if i == 0:
-                tile_max = scores_max
-                tile_probs = torch.exp(scores - tile_max)
-                # tile_output = torch.matmul(tile_probs, v_page_4d)
-                tile_output = _indirect_matmul_mock(
-                    tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
-                )
-                tile_sum = tile_probs.sum(dim=-1, keepdim=True)
+            if _NUM_STABLE_SOFTMAX:
+                scores_max = scores.max(dim=-1, keepdim=True)[0]
+                if i == 0:
+                    tile_max = scores_max
+                    tile_probs = torch.exp(scores - tile_max)
+                    tile_output = _indirect_matmul_mock(
+                        tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
+                    )
+                    tile_sum = tile_probs.sum(dim=-1, keepdim=True)
+                else:
+                    # i > 0 only reachable after the i == 0 branch initialized these.
+                    assert tile_max is not None
+                    assert tile_sum is not None
+                    assert tile_output is not None
+                    new_max = torch.maximum(tile_max, scores_max)
+                    rescale = torch.exp(tile_max - new_max)
+                    tile_output = tile_output * rescale
+                    tile_sum = tile_sum * rescale
+                    tile_probs = torch.exp(scores - new_max)
+                    tile_output += _indirect_matmul_mock(
+                        tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
+                    )
+                    tile_sum = tile_sum + tile_probs.sum(dim=-1, keepdim=True)
+                    tile_max = new_max
             else:
-                # i > 0 only reachable after the i == 0 branch initialized these.
-                assert tile_max is not None
-                assert tile_sum is not None
-                assert tile_output is not None
-                new_max = torch.maximum(tile_max, scores_max)
-                rescale = torch.exp(tile_max - new_max)
-                tile_output = tile_output * rescale
-                tile_sum = tile_sum * rescale
-                tile_probs = torch.exp(scores - new_max)
-                # tile_output = tile_output + torch.matmul(tile_probs, v_page_4d)
-                tile_output += _indirect_matmul_mock(
-                    tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
-                )
-                tile_sum = tile_sum + tile_probs.sum(dim=-1, keepdim=True)
-                tile_max = new_max
+                tile_probs = torch.exp(scores)
+                if i == 0:
+                    tile_output = _indirect_matmul_mock(
+                        tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
+                    )
+                    tile_sum = tile_probs.sum(dim=-1, keepdim=True)
+                else:
+                    assert tile_sum is not None
+                    assert tile_output is not None
+                    tile_output += _indirect_matmul_mock(
+                        tile_probs, None, v_pages, page_idx, transform_b=lambda t: t.unsqueeze(1)
+                    )
+                    tile_sum = tile_sum + tile_probs.sum(dim=-1, keepdim=True)
 
         assert tile_output is not None and tile_sum is not None
         return tile_output / tile_sum
