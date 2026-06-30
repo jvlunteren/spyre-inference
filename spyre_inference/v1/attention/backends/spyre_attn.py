@@ -829,17 +829,13 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
                 # Reshape back: [num_kv_heads, num_queries_per_kv, padded_query_len, head_size]
                 #   → [query_len, num_heads, head_size]
-                # Pull result to CPU before slicing (Spyre slicing is broken),
-                # then transfer each per-token contiguous slice back for scatter.
+                # Pull result to CPU (Spyre transpose+contiguous on the head axes
+                # is broken) and write into the CPU staging buffer; one bulk H2D
+                # at the end of the loop replaces the per-token writes.
                 result_cpu = convert(result, "cpu", output.dtype)
                 result_cpu = result_cpu.reshape(1, num_heads, aligned_max_query_len, head_size)
                 result_cpu = result_cpu.transpose(1, 2).contiguous()
-                for i in range(query_len):
-                    tok = convert(
-                        result_cpu[0, i : i + 1, :, :].contiguous(),
-                        _target_device,
-                        output.dtype,
-                    )
-                    _overwrite(tok, output, [0], [q_start + i])
+                output_cpu[q_start:q_end] = result_cpu[0, :query_len, :, :]
 
+        output.copy_(convert(output_cpu, device=_target_device))
         return output
