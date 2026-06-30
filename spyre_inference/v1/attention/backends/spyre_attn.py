@@ -14,10 +14,9 @@
 
 """Paged KV-cache attention backend for Spyre using list-of-pages and online softmax."""
 
+import functools
 from dataclasses import dataclass
 from typing import Callable, ClassVar, NamedTuple
-
-import contextlib
 
 import torch
 
@@ -41,8 +40,23 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
-# When set, wraps forward(), reshape_and_cache(), and online_softmax() in record_function spans.
+# When set, wraps forward(), _reshape_and_cache(), and _online_softmax_attention()
+# in torch.profiler.record_function spans for kineto trace capture.
 _ATTN_PROFILING = False
+
+
+def _record_function(name: str):
+    """Decorator that wraps a method in a profiler span when _ATTN_PROFILING is set."""
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if _ATTN_PROFILING:
+                with torch.profiler.record_function(name):
+                    return fn(*args, **kwargs)
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
 
 # TODO: Make these hyperparameters configurable
 # KV length alignment: KV tensors are padded to the next multiple of this value.
@@ -660,6 +674,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
     # and `bind_kv_cache` smuggles through a dict typed `dict[str, Tensor]`.
     # The matching pair of overrides preserves the runtime contract; ty
     # cannot see the co-evolution.
+    @_record_function("spyre_attn::forward")
     def forward(  # ty: ignore[invalid-method-override]
         self,
         layer: AttentionLayer,
@@ -675,47 +690,43 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         if attn_metadata is None:
             return output
 
-        with (
-            torch.profiler.record_function("spyre_attn::forward")
-            if _ATTN_PROFILING
-            else contextlib.nullcontext()
-        ):
-            k_pages, v_pages = kv_cache
-            # Derive target device from the KV pages — query may arrive on CPU
-            # (e.g. in unit tests) while pages live on the real Spyre device.
-            _target_device = k_pages[0].device
-            num_actual_tokens = attn_metadata.num_actual_tokens
+        k_pages, v_pages = kv_cache
+        # Derive target device from the KV pages — query may arrive on CPU
+        # (e.g. in unit tests) while pages live on the real Spyre device.
+        _target_device = k_pages[0].device
+        num_actual_tokens = attn_metadata.num_actual_tokens
 
-            # Spyre slicing corrupts memory, so
-            # bring q/k/v to CPU once for all slicing below; per-token slices get
-            # transferred to Spyre individually inside the scatter and attention paths.
-            key_cpu = convert(key, "cpu")
-            value_cpu = convert(value, "cpu")
-            query_cpu = convert(query, "cpu")
+        # Spyre slicing corrupts memory, so
+        # bring q/k/v to CPU once for all slicing below; per-token slices get
+        # transferred to Spyre individually inside the scatter and attention paths.
+        key_cpu = convert(key, "cpu")
+        value_cpu = convert(value, "cpu")
+        query_cpu = convert(query, "cpu")
 
-            # Step 1: Reshape and cache — write new tokens into pages
-            self._reshape_and_cache(
-                key_cpu[:num_actual_tokens],
-                value_cpu[:num_actual_tokens],
-                k_pages,
-                v_pages,
-                attn_metadata.slot_block_indices[:num_actual_tokens],
-                attn_metadata.slot_block_offsets[:num_actual_tokens],
-                _target_device,
-            )
+        # Step 1: Reshape and cache — write new tokens into pages
+        self._reshape_and_cache(
+            key_cpu[:num_actual_tokens],
+            value_cpu[:num_actual_tokens],
+            k_pages,
+            v_pages,
+            attn_metadata.slot_block_indices[:num_actual_tokens],
+            attn_metadata.slot_block_offsets[:num_actual_tokens],
+            _target_device,
+        )
 
-            # Step 2: Online softmax attention over pages (varlen)
-            output = self._online_softmax_attention(
-                query_cpu[:num_actual_tokens],
-                k_pages,
-                v_pages,
-                attn_metadata,
-                output,
-                _target_device,
-            )
+        # Step 2: Online softmax attention over pages (varlen)
+        output = self._online_softmax_attention(
+            query_cpu[:num_actual_tokens],
+            k_pages,
+            v_pages,
+            attn_metadata,
+            output,
+            _target_device,
+        )
 
         return output
 
+    @_record_function("spyre_attn::reshape_and_cache")
     def _reshape_and_cache(
         self,
         key_cpu: torch.Tensor,
@@ -732,22 +743,18 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         k_pages, v_pages: list[Tensor], each [num_kv_heads, block_size, head_size]
         block_indices, block_offsets: precomputed from slot_mapping in metadata builder
         """
-        with (
-            torch.profiler.record_function("spyre_attn::reshape_and_cache")
-            if _ATTN_PROFILING
-            else contextlib.nullcontext()
-        ):
-            num_tokens = key_cpu.shape[0]
+        num_tokens = key_cpu.shape[0]
 
-            # Force CPU contiguous: value from QKV split-along-last-dim is
-            # non-contiguous; transferring a non-contiguous CPU tensor to Spyre
-            # silently corrupts data (see custom_ops/silu_and_mul.py).
-            key_cpu = key_cpu.contiguous()
-            value_cpu = value_cpu.contiguous()
+        # Force CPU contiguous: value from QKV split-along-last-dim is
+        # non-contiguous; transferring a non-contiguous CPU tensor to Spyre
+        # silently corrupts data (see custom_ops/silu_and_mul.py).
+        key_cpu = key_cpu.contiguous()
+        value_cpu = value_cpu.contiguous()
 
-            fn = self._get_reshape_fn(num_tokens)
-            fn(key_cpu, value_cpu, k_pages, v_pages, block_indices, block_offsets, _target_device)
+        fn = self._get_reshape_fn(num_tokens)
+        fn(key_cpu, value_cpu, k_pages, v_pages, block_indices, block_offsets, _target_device)
 
+    @_record_function("spyre_attn::online_softmax")
     def _online_softmax_attention(
         self,
         query_cpu: torch.Tensor,
@@ -781,61 +788,68 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             "attention_mask_tiles must be precomputed by the metadata builder"
         )
 
-        with (
-            torch.profiler.record_function("spyre_attn::online_softmax")
-            if _ATTN_PROFILING
-            else contextlib.nullcontext()
-        ):
-            for seq_idx in range(num_seqs):
-                # Most-naive implementation: no parallelization
-                # over sequences or GQA optimization
-                q_start = int(query_start_loc[seq_idx].item())
-                q_end = int(query_start_loc[seq_idx + 1].item())
-                query_len = q_end - q_start
-                kv_len = int(seq_lens[seq_idx].item())
+        # Scattering into `output` on Spyre dim=0 has no working primitive:
+        # `output[i:j] = ...` and `narrow().copy_(...)` silently write to row 0;
+        # `torch.ops.spyre.overwrite` is deprecated and its compile_once wrapper
+        # compiles one SDSC binary per unique offset, which recurses past the
+        # dynamo cache limit once vLLM's model compile has filled it. Raising
+        # the limit unblocks short tests but compiles N binaries for a
+        # query_len=N prefill, which doesn't scale to long contexts. Stage the
+        # result on CPU and bulk-copy at the end of the per-sequence loop.
+        # Revisit when torch-spyre lands symbolic-offset overwrite
+        # (torch-spyre#220 / #1371-3).
+        output_cpu = torch.zeros_like(output, device="cpu")
 
-                q_seq = query_cpu[q_start:q_end]
+        for seq_idx in range(num_seqs):
+            # Most-naive implementation: no parallelization
+            # over sequences or GQA optimization
+            q_start = int(query_start_loc[seq_idx].item())
+            q_end = int(query_start_loc[seq_idx + 1].item())
+            query_len = q_end - q_start
+            kv_len = int(seq_lens[seq_idx].item())
 
-                # Pad query to global aligned_max_query_len (uniform for all seqs)
-                if aligned_max_query_len > query_len:
-                    q_seq = torch.nn.functional.pad(
-                        q_seq,
-                        (0, 0, 0, 0, 0, aligned_max_query_len - query_len),
-                        mode="constant",
-                        value=0.0,
-                    )
+            q_seq = query_cpu[q_start:q_end]
 
-                # Reshape: [padded_query_len, num_heads, head_size]
-                #   → [num_kv_heads, num_queries_per_kv, padded_query_len, head_size]
-                q = q_seq.unsqueeze(0).transpose(1, 2).contiguous()
-                q = q.reshape(num_kv_heads, num_queries_per_kv, aligned_max_query_len, head_size)
+            # Pad query to global aligned_max_query_len (uniform for all seqs)
+            if aligned_max_query_len > query_len:
+                q_seq = torch.nn.functional.pad(
+                    q_seq,
+                    (0, 0, 0, 0, 0, aligned_max_query_len - query_len),
+                    mode="constant",
+                    value=0.0,
+                )
 
-                # TODO: MHA (num_queries_per_kv=1) currently fails due to a Spyre compiler
-                # bug in layout propagation through transpose operations. The compiler's
-                # deadcode elimination pass fails with stride/index mismatches when
-                # handling the degenerate dimension in MHA. GQA (num_queries_per_kv > 1)
-                # works correctly. See error: "cannot restickify any input layout of y
-                # to carry y_var=d2" in propagate_layouts.py:341
+            # Reshape: [padded_query_len, num_heads, head_size]
+            #   → [num_kv_heads, num_queries_per_kv, padded_query_len, head_size]
+            q = q_seq.unsqueeze(0).transpose(1, 2).contiguous()
+            q = q.reshape(num_kv_heads, num_queries_per_kv, aligned_max_query_len, head_size)
 
-                num_blocks_needed = (kv_len + block_size - 1) // block_size
-                page_indices = [int(block_table[seq_idx, i]) for i in range(num_blocks_needed)]
-                # mask_tiles = [m.to(_target_device) for m in mask_tiles_all[seq_idx]]
-                mask_tiles = [convert(m, device=_target_device) for m in mask_tiles_all[seq_idx]]
+            # TODO: MHA (num_queries_per_kv=1) currently fails due to a Spyre compiler
+            # bug in layout propagation through transpose operations. The compiler's
+            # deadcode elimination pass fails with stride/index mismatches when
+            # handling the degenerate dimension in MHA. GQA (num_queries_per_kv > 1)
+            # works correctly. See error: "cannot restickify any input layout of y
+            # to carry y_var=d2" in propagate_layouts.py:341
 
-                # Run attention on target device
-                q_dev = convert(q, device=_target_device)
-                attn_fn = self._get_attn_fn(num_blocks_needed, aligned_max_query_len)
-                result = attn_fn(q_dev, k_pages, v_pages, page_indices, mask_tiles, self.scale)
+            num_blocks_needed = (kv_len + block_size - 1) // block_size
+            page_indices = [int(block_table[seq_idx, i]) for i in range(num_blocks_needed)]
+            # mask_tiles = [m.to(_target_device) for m in mask_tiles_all[seq_idx]]
+            mask_tiles = [convert(m, device=_target_device) for m in mask_tiles_all[seq_idx]]
 
-                # Reshape back: [num_kv_heads, num_queries_per_kv, padded_query_len, head_size]
-                #   → [query_len, num_heads, head_size]
-                # Pull result to CPU (Spyre transpose+contiguous on the head axes
-                # is broken) and write into the CPU staging buffer; one bulk H2D
-                # at the end of the loop replaces the per-token writes.
-                result_cpu = convert(result, "cpu", output.dtype)
-                result_cpu = result_cpu.reshape(1, num_heads, aligned_max_query_len, head_size)
-                result_cpu = result_cpu.transpose(1, 2).contiguous()
-                output_cpu[q_start:q_end] = result_cpu[0, :query_len, :, :]
+            # Run attention on target device
+            q_dev = convert(q, device=_target_device)
+            attn_fn = self._get_attn_fn(num_blocks_needed, aligned_max_query_len)
+            result = attn_fn(q_dev, k_pages, v_pages, page_indices, mask_tiles, self.scale)
+
+            # Reshape back: [num_kv_heads, num_queries_per_kv, padded_query_len, head_size]
+            #   → [query_len, num_heads, head_size]
+            # Pull result to CPU (Spyre transpose+contiguous on the head axes
+            # is broken) and write into the CPU staging buffer; one bulk H2D
+            # at the end of the loop replaces the per-token writes.
+            result_cpu = convert(result, "cpu", output.dtype)
+            result_cpu = result_cpu.reshape(1, num_heads, aligned_max_query_len, head_size)
+            result_cpu = result_cpu.transpose(1, 2).contiguous()
+            output_cpu[q_start:q_end] = result_cpu[0, :query_len, :, :]
 
         output.copy_(convert(output_cpu, device=_target_device))
         return output
