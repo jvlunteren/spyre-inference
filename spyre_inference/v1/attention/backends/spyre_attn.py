@@ -532,23 +532,23 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         kv_end = kv_start + block_size
 
         q_pos = torch.arange(aligned_max_query_len)  # [aligned_max_query_len]
-        kv_pos = torch.arange(kv_start, kv_end)      # [block_size]
+        kv_pos = torch.arange(kv_start, kv_end)  # [block_size]
 
         # Padding mask: query rows beyond query_len are fully masked;
         # KV columns beyond kv_len are fully masked.
-        q_valid = q_pos < query_len                   # [aligned_max_query_len]
-        kv_valid = kv_pos < kv_len                    # [block_size]
+        q_valid = q_pos < query_len  # [aligned_max_query_len]
+        kv_valid = kv_pos < kv_len  # [block_size]
         attend = q_valid.unsqueeze(1) & kv_valid.unsqueeze(0)  # [Q, B]
 
         # Causal mask (prefill only): query at absolute position
         # context_len + q_pos can only attend to KV positions <= that value.
         if apply_causal_mask:
-            causal_limit = context_len + q_pos        # [aligned_max_query_len]
+            causal_limit = context_len + q_pos  # [aligned_max_query_len]
             attend = attend & (kv_pos.unsqueeze(0) <= causal_limit.unsqueeze(1))
 
         # Sliding window: per-query window_start.
         assert self.sliding_window is not None
-        abs_q_pos = context_len + q_pos               # [aligned_max_query_len]
+        abs_q_pos = context_len + q_pos  # [aligned_max_query_len]
         window_start = (abs_q_pos - self.sliding_window + 1).clamp(min=0)
         attend = attend & (kv_pos.unsqueeze(0) >= window_start.unsqueeze(1))
 
@@ -628,10 +628,17 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             is_lower_boundary = b <= last_lower_boundary
             is_upper_boundary = (b == last_block) and not is_lower_boundary
             if is_lower_boundary or is_upper_boundary:
-                tiles.append(self._build_single_tile(
-                    seq_idx, b, kv_len, query_len, context_len,
-                    aligned_max_query_len, apply_causal_mask,
-                ))
+                tiles.append(
+                    self._build_single_tile(
+                        seq_idx,
+                        b,
+                        kv_len,
+                        query_len,
+                        context_len,
+                        aligned_max_query_len,
+                        apply_causal_mask,
+                    )
+                )
             else:
                 # Interior block: entirely within every query's window and
                 # entirely filled with valid KV tokens. Mask is all-zero.
@@ -708,8 +715,12 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 context_len_s = kv_len_s - query_len_s
 
                 active_bs, tiles = self._build_active_tiles_with_skip(
-                    s, kv_len_s, query_len_s, context_len_s,
-                    aligned_max_query_len, apply_causal_mask,
+                    s,
+                    kv_len_s,
+                    query_len_s,
+                    context_len_s,
+                    aligned_max_query_len,
+                    apply_causal_mask,
                 )
                 active_block_indices.append(active_bs)
                 attention_mask_tiles.append(tiles)
