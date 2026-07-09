@@ -1,7 +1,7 @@
 # Pinned Spyre RPM package names, one per line.
 # Lines starting with # are ignored.
 # Specify exact versions to pin (e.g. ibm-deeptools-1.2.3-1.el8).
-# The cache key is derived from this file's hash — changing any entry
+# The cache key is derived from this file's hash. Changing any entry
 # invalidates the GHA RPM cache and triggers a fresh download.
 #
 ibm-aiu-toolbox-e2e-1.2.5_rc.1-1_91.el10
