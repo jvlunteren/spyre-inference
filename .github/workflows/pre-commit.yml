@@ -57,10 +57,19 @@ jobs:
         LOCK_HASH="${{ hashFiles('spyre-rpms.lock') }}"
         echo "Lock file hash:  ${LOCK_HASH}"
         echo "Cache key:       spyre-rpms-${LOCK_HASH}"
+        echo ""
+        echo "=== Cache-relevant env vars ==="
         echo "ACTIONS_CACHE_URL=${ACTIONS_CACHE_URL:-<not set>}"
+        echo "ACTIONS_RESULTS_URL=${ACTIONS_RESULTS_URL:-<not set>}"
+        echo "ACTIONS_RUNTIME_URL=${ACTIONS_RUNTIME_URL:-<not set>}"
         echo "ACTIONS_RUNTIME_TOKEN present: $([[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]] && echo yes || echo no)"
-        echo "--- spyre-rpms.lock ---"
-        cat spyre-rpms.lock
+        echo "ACTIONS_ID_TOKEN_REQUEST_URL=${ACTIONS_ID_TOKEN_REQUEST_URL:-<not set>}"
+        echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN present: $([[ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]] && echo yes || echo no)"
+        echo ""
+        echo "=== Runner info ==="
+        echo "RUNNER_TEMP=${RUNNER_TEMP:-<not set>}"
+        echo "GITHUB_REF=${GITHUB_REF:-<not set>}"
+        echo "GITHUB_EVENT_NAME=${GITHUB_EVENT_NAME:-<not set>}"
 
     - name: Restore RPM cache
       id: rpm-cache
