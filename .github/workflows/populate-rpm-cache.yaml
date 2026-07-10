@@ -71,15 +71,11 @@ jobs:
       - name: Fetch PR's spyre-rpms.lock
         if: github.event_name == 'workflow_run' || inputs.head_sha != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head_sha }}
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name || inputs.head_repository || github.repository }}
         run: |
-          curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github.v3.raw" \
-            "${GITHUB_API_URL}/repos/${HEAD_REPO}/contents/spyre-rpms.lock?ref=${HEAD_SHA}" \
-            > spyre-rpms.lock
+          git fetch "${GITHUB_SERVER_URL}/${HEAD_REPO}.git" "${HEAD_SHA}"
+          git show FETCH_HEAD:spyre-rpms.lock > spyre-rpms.lock
 
       - name: Check RPM cache
         id: rpm-cache
