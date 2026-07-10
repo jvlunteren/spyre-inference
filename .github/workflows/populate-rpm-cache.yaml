@@ -1,11 +1,13 @@
 name: populate-rpm-cache
 
 on:
-  # For fork PRs: the dispatch-for-pr job below cannot write cache (GitHub
-  # June 2026 read-only cache restriction for untrusted triggers). Instead it
-  # fires a workflow_dispatch event via the GitHub API — a brand-new trusted
-  # event with full cache write access. Only fires when spyre-rpms.lock changes.
-  pull_request:
+  # For fork PRs: pull_request tokens are capped read-only so a workflow_dispatch
+  # call would 403. pull_request_target runs in base-repo context with a full
+  # write token. The dispatch-for-pr job below does no checkout (no untrusted
+  # code runs), so pull_request_target is safe here. It fires a workflow_dispatch
+  # event — a brand-new trusted event with full cache write access.
+  # Only fires when spyre-rpms.lock changes.
+  pull_request_target:
     paths:
       - spyre-rpms.lock
   push:
@@ -40,12 +42,12 @@ defaults:
     shell: bash
 
 jobs:
-  # Relay job: fork pull_request events cannot write the GHA cache (GitHub's
-  # June 2026 security restriction). This job fires a workflow_dispatch via the
-  # GitHub API. That event is trusted and runs with full cache write access.
+  # Relay job: fork pull_request tokens are read-only so cannot call the
+  # workflow dispatch API. pull_request_target gives a base-repo write token.
+  # This job does no checkout, so running under pull_request_target is safe.
   dispatch-for-pr:
     name: Dispatch populate for PR
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -55,12 +57,13 @@ jobs:
         run: |
           gh workflow run populate-rpm-cache.yaml \
             --repo "${{ github.repository }}" \
+            --ref "rpm-caching-test" \
             --field "head_sha=${{ github.event.pull_request.head.sha }}" \
             --field "head_repository=${{ github.event.pull_request.head.repo.full_name }}"
 
   populate:
     name: Download and cache Spyre RPMs
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request_target'
     runs-on: ubuntu-latest
 
     steps:
