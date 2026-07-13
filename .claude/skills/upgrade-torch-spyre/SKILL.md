@@ -1,6 +1,6 @@
 ---
 name: upgrade-torch-spyre
-description: Bump the pinned `torch-spyre` git rev in `pyproject.toml` and update `spyre-rpms.lock` to match the host's installed RPMs, binary-search to the latest commit that actually compiles against this host's `ibm-*` RPMs, clear the stale inductor cache, run the full test suite, and write a reviewer-ready PR description. Use whenever the user asks to "bump", "upgrade", "update", or "pull up" torch-spyre — typically after new `ibm-deeptools` / `ibm-flex` / `ibm-senlib` packages land that unblock previously-failing torch-spyre commits. Encodes that build failures are the expected signal that supporting libs need a matching bump, that the torchinductor cache must be wiped after the bump to avoid `TypeError: ...__init__() got an unexpected keyword argument ...` red herrings, and the curated PR-description shape (notable upstream PRs + bisect table + installed `ibm-*` RPM versions).
+description: Bump the pinned `torch-spyre` git rev in `pyproject.toml` and update `spyre-rpms.lock` to match artifactory, binary-search to the latest commit that actually compiles against this host's `ibm-*` RPMs, clear the stale inductor cache, run a smoke test, and write a reviewer-ready PR description. Use whenever the user asks to "bump", "upgrade", "update", or "pull up" torch-spyre — typically after new `ibm-deeptools` / `ibm-flex` / `ibm-senlib` packages land that unblock previously-failing torch-spyre commits. Encodes that build failures are the expected signal that supporting libs need a matching bump, that the torchinductor cache must be wiped after the bump to avoid `TypeError: ...__init__() got an unexpected keyword argument ...` red herrings, and the curated PR-description shape (notable upstream PRs + bisect table + installed `ibm-*` RPM versions).
 ---
 
 # Upgrade torch-spyre
@@ -141,79 +141,122 @@ rm -rf /tmp/torchinductor_*
 
 If you forget, the symptom is a `TypeError` referencing a kwarg or attribute that you can grep for and find *only* in `/tmp/torchinductor_*/**/*.py`, never in `.venv/lib/python3.12/site-packages/torch_spyre/`. That's the confirmation.
 
-### 5. Run the full test suite
+### 5. Run a smoke test
 
-Spyre is single-process — **no `-n`, no `xdist`, no backgrounding two pytest invocations**. Run sequentially:
+The full test suite takes ~18 minutes and is better left to CI (which parallelizes across runners). Instead, run a single quick test to verify the build is functional:
 
 ```bash
-uv run --no-sync pytest 2>&1 | tee /tmp/spyre-bisect/pytest-full.log
+uv run --no-sync pytest tests/test_vllm_spyre_next.py::test_basic_model_load -m "not upstream" -x --timeout=120 -q 2>&1 | tail -20
 ```
 
-`--no-sync` is required when iterating after a manual rebuild (see CLAUDE.md "Iterating on a Local `torch-spyre` Checkout"); for the post-bump run from a clean `uv sync --frozen` you don't strictly need it, but it's harmless and saves a re-sync.
+This confirms torch-spyre loads and a model can be instantiated on the Spyre device — catching the most common bump failures (stale inductor cache, missing symbols, import errors) quickly.
 
-Expect ~18 minutes wall-clock. Triage failures:
+If the smoke test passes, tell the user:
 
-- **`TypeError: ...__init__() got an unexpected keyword argument ...`** during model load → stale inductor cache (you forgot §4). Clear it and re-run just the failures.
+> Smoke test passed. The branch is ready for you to commit and push — CI will run the full suite.
+
+Do **not** commit or push on behalf of the user. The human decides when to commit and what branch to push to.
+
+If it fails, triage:
+
+- **`TypeError: ...__init__() got an unexpected keyword argument ...`** during model load → stale inductor cache (you forgot §4). Clear it and re-run.
+- **`ImportError` or `RuntimeError` referencing a missing symbol** → the bump pulled in a commit that needs newer RPMs than are installed. Bisect back.
 - Numerical mismatches, fallback-warning storms, compile errors on `spyre` → real regressions introduced by the bump. Hand to [[debug-spyre]].
-- A handful of `tests/test_distributed_tp2.py` / `tests/test_vllm_spyre_next.py` failures with the same root cause → probably one upstream change touched a path used by all of them. Read one traceback, fix once.
 
 ### 6. Update `spyre-rpms.lock`
 
-The torch-spyre bump typically coincides with newer `ibm-*` RPMs on the build host. Update the lock file to match what's installed (which the tests just passed against).
+The torch-spyre bump typically coincides with newer `ibm-*` RPMs on the build host. The lock file entries must exactly match the filenames in artifactory (minus the `.x86_64.rpm` suffix), because `download_rpms.sh` constructs the download URL from them.
 
-#### Read installed RPMs
+**The trap:** `rpm -qa` on the build host reports the build-number suffix as `_0` (e.g. `ibm-deeptools-2.0.0-0.main.1+1401.ee2f97a_0.el10`), but the actual artifactory filename has a different build number (e.g. `_197.el10`). Writing the `rpm -qa` output directly into the lock file will cause cache misses and download failures.
+
+#### Step 1: Read installed RPMs (to get version + commit info)
 
 ```bash
 rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 'ibm-*' \
   | grep -v '(none)' \
   | grep -E '^ibm-(deeptools|flex|senlib|spyre-comms|aiu-toolbox)' \
-  | sort > /tmp/new-rpms.txt
-cp spyre-rpms.lock spyre-rpms.lock.old
+  | sort > /tmp/host-rpms.txt
 ```
 
-#### Sanity-check: no accidental downgrades
+This gives us the package names, versions, and commit SHAs — but with `_0` as the build suffix. We need to resolve the real build numbers from artifactory.
 
-Compare build numbers between old and new lock files. The version format is:
+#### Step 2: Get the correct build numbers from a `populate-rpm-cache` job
 
+The `populate-rpm-cache` workflow's "List Artifactory RPMs" step dumps all available filenames. Find a recent run that had a cache miss (so it actually listed the RPMs):
+
+```bash
+# List recent runs
+gh run list --repo torch-spyre/spyre-inference \
+  --workflow populate-rpm-cache.yaml --limit 15 \
+  --json databaseId,status,conclusion,createdAt
+
+# Check each run's logs for the listing (cache-hit runs won't have it)
+# Look for one that downloaded rather than hit cache:
+gh run view <RUN_ID> --log 2>/dev/null | grep -c "ibm-deeptools"
+# If > 0, this run listed the RPMs
 ```
+
+Once you find a run with the listing, extract the highest build number for each installed package version:
+
+```bash
+LOGS=$(gh run view <RUN_ID> --log 2>/dev/null)
+
+while IFS= read -r host_line; do
+  # Strip the _0.el10 suffix to get the version prefix for matching
+  prefix=$(echo "$host_line" | sed 's/_[0-9]*\.el10$//')
+  # Find the highest build number for this prefix in artifactory
+  build_num=$(echo "$LOGS" | grep -F "$prefix" | grep -oP '_\K[0-9]+(?=\.el10)' | sort -n | tail -1)
+  if [[ -n "$build_num" ]]; then
+    echo "${prefix}_${build_num}.el10"
+  else
+    echo "NOT FOUND IN ARTIFACTORY: $host_line"
+  fi
+done < /tmp/host-rpms.txt > /tmp/resolved-rpms.txt
+```
+
+If any packages show "NOT FOUND IN ARTIFACTORY", it means the version installed on the host hasn't been published yet. This can happen if packages were installed from a local build. Ask the user how to proceed.
+
+#### Step 3: Sanity-check — no accidental downgrades
+
+Compare commit counts (the monotonically increasing number) between old and new lock files:
+
+```text
 ibm-flex-2.0.0-0.main.1+377.61d25cc_142.el10
                          ^^^
                          commit count — monotonically increasing on main
 ```
 
-Extract and compare:
-
 ```bash
 parse_base() {
-  # "ibm-flex-devel-2.0.0-0.main..." → "ibm-flex-devel"
   echo "$1" | grep -oP '^.+?(?=-\d+\.\d+\.\d+)'
 }
-parse_build_num() {
-  # "ibm-flex-2.0.0-0.main.1+377.61d25cc_142.el10" → "377"
+parse_commit_count() {
   echo "$1" | grep -oP '(?<=\+)\d+(?=\.)'
 }
 
+cp spyre-rpms.lock spyre-rpms.lock.old
 echo "=== Downgrade check ==="
 while IFS= read -r old_line; do
   base=$(parse_base "$old_line")
-  old_num=$(parse_build_num "$old_line")
-  new_line=$(grep "^${base}-[0-9]" /tmp/new-rpms.txt | head -1)
+  old_num=$(parse_commit_count "$old_line")
+  new_line=$(grep "^${base}-[0-9]" /tmp/resolved-rpms.txt | head -1)
   if [[ -z "$new_line" ]]; then
-    echo "WARNING: $base not found in new RPMs (removed from host?)"
+    echo "WARNING: $base not found in new RPMs"
     continue
   fi
-  new_num=$(parse_build_num "$new_line")
+  new_num=$(parse_commit_count "$new_line")
   if [[ "$new_num" -lt "$old_num" ]]; then
     echo "WARNING: $base downgraded: $old_num → $new_num"
   else
     echo "OK: $base $old_num → $new_num"
   fi
 done < <(grep -v '^[[:space:]]*#' spyre-rpms.lock.old | grep -v '^[[:space:]]*$')
+rm spyre-rpms.lock.old
 ```
 
 Downgrade warnings are informational — the user may intentionally roll back — but confirm before proceeding.
 
-#### Write the new lock file
+#### Step 4: Write the new lock file
 
 ```bash
 cat > spyre-rpms.lock <<'HEADER'
@@ -224,33 +267,24 @@ cat > spyre-rpms.lock <<'HEADER'
 # invalidates the GHA RPM cache and triggers a fresh download.
 #
 HEADER
-cat /tmp/new-rpms.txt >> spyre-rpms.lock
+cat /tmp/resolved-rpms.txt >> spyre-rpms.lock
 ```
 
-Clean up: `rm spyre-rpms.lock.old`
+#### Fallback: no recent populate-rpm-cache listing available
 
-#### Optional: git-level ancestry verification
+If all recent `populate-rpm-cache` runs were cache hits (no RPM listing in logs), ask the user for one of:
 
-If `gh` is authenticated to `github.ibm.com`, verify that the new commit SHA is a descendant of the old one for packages with known repos:
+1. **Trigger a fresh run** with a dummy lock-file change to force a cache miss
+2. **Provide artifactory credentials** so you can query the API directly:
 
-| Lock file prefix | github.ibm.com repo |
-|---|---|
-| `ibm-deeptools` / `ibm-deeptools-devel` | `ai-chip-toolchain/deeptools` |
-| `ibm-flex` / `ibm-flex-devel` | `ai-chip-toolchain/flex` |
-| `ibm-spyre-comms` / `ibm-spyre-comms-*` | `ai-chip-toolchain/spyre-comms` |
-| `ibm-aiu-toolbox-e2e` | `ai-chip-toolchain/aiu-toolbox` |
+   ```bash
+   curl -fSL \
+     -H "Authorization: Bearer ${ARTIFACTORY_TOKEN}" \
+     "${ARTIFACTORY_BASE_URL}/artifactory/api/storage/${ARTIFACTORY_RPM_PATH}/x86_64?list&deep=0" \
+     | jq -r '.files[].uri'
+   ```
 
-Extract the 7-char short SHA from the release field (`0.main.1+377.61d25cc_142` → `61d25cc`) and verify:
-
-```bash
-# Example for flex:
-gh api --hostname github.ibm.com \
-  "repos/ai-chip-toolchain/flex/compare/${OLD_SHA}...${NEW_SHA}" \
-  --jq '.status' 2>/dev/null
-# "ahead" or "diverged" = OK (new is newer). "behind" = downgrade. "identical" = no change.
-```
-
-Skip this check silently if `gh auth status --hostname github.ibm.com` fails (not all environments have internal GH auth).
+Do **not** guess build numbers. If no authoritative source is available, stop and ask the user.
 
 #### Cache population
 
@@ -269,6 +303,38 @@ This makes the build boundary reproducible — the next person bumping can tell 
 ### 8. Write the PR description
 
 Write to `PR_torch_spyre_bump.md`. Follow `.github/pull_request_template.md`:
+
+Use one of the two templates below depending on whether a bisect was needed:
+
+#### If the tip built (all N commits included)
+
+````markdown
+## Description
+
+Bumps `torch-spyre` from `<old-sha>` to `<new-sha>` — all <N> upstream commits since the previous pin. The tip of `main` compiled cleanly against the currently-installed RPMs (no bisect needed).
+
+### Notable upstream changes in this range
+
+<3–6 curated bullets from §2>
+
+### Installed `ibm-*` packages on the build host
+
+```
+<output of rpm -qa 'ibm-*' | sort>
+```
+
+## Test Plan
+
+- [x] `uv lock` resolves cleanly to `<new-sha>`
+- [x] `uv sync --frozen` builds the torch-spyre C++ extension successfully
+- [x] Smoke test (`test_basic_model_load`) passes locally
+- [ ] Full CI suite passes (pushed for CI validation)
+- [x] `spyre-rpms.lock` updated — no downgrades (commit-count check passed)
+
+**Reviewer note:** when pulling this branch onto an existing checkout, `rm -rf /tmp/torchinductor_*` before running tests — the cache bakes in references to internals that were renamed/removed across the bump.
+````
+
+#### If a bisect was needed (K < N commits included)
 
 ````markdown
 ## Description
@@ -298,19 +364,28 @@ Bumps `torch-spyre` from `<old-sha>` to `<new-sha>` — <K> of the <N> upstream 
 
 - [x] `uv lock` resolves cleanly to `<new-sha>`
 - [x] `uv sync --frozen` builds the torch-spyre C++ extension successfully
-- [x] `uv run --no-sync pytest` — **<P> passed, <S> skipped, <F> failed**
-- [x] `spyre-rpms.lock` updated — no downgrades (build-number check passed)
-- [x] <note about inductor cache, if it bit you>
+- [x] Smoke test (`test_basic_model_load`) passes locally
+- [ ] Full CI suite passes (pushed for CI validation)
+- [x] `spyre-rpms.lock` updated — no downgrades (commit-count check passed)
 
 **Reviewer note:** when pulling this branch onto an existing checkout, `rm -rf /tmp/torchinductor_*` before running tests — the cache bakes in references to internals that were renamed/removed across the bump.
-
 ````
+
+### 9. Stop — do not commit or push
+
+The skill's job ends here. Present the user with a summary of what changed and the draft PR description. The user will:
+
+1. Review the changes (`pyproject.toml`, `uv.lock`, `spyre-rpms.lock`)
+2. Commit on their chosen branch
+3. Push and open a PR (which triggers the full CI pipeline and `populate-rpm-cache`)
+
+Do **not** run `git add`, `git commit`, `git push`, `gh pr create`, or any equivalent. The human owns that boundary.
 
 ## Files touched (typical)
 
 - `pyproject.toml` (the rev string)
 - `uv.lock` (re-locked twice — once for the rev, plus uv may bump transitives)
-- `spyre-rpms.lock` (updated to match host's installed `ibm-*` RPMs)
+- `spyre-rpms.lock` (updated with correct artifactory build numbers)
 - `PR_torch_spyre_bump.md` (scratch description for the user to paste)
 
 Nothing in `spyre_inference/` should change during a pure bump. If you find yourself editing the package, you've crossed into "the bump exposed a regression" territory — stop, save state, and triage with [[debug-spyre]].
