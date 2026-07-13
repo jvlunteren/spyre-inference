@@ -1,6 +1,6 @@
 ---
 name: upgrade-torch-spyre
-description: Bump the pinned `torch-spyre` git rev in `pyproject.toml`, binary-search to the latest commit that actually compiles against this host's `ibm-*` RPMs, clear the stale inductor cache, run the full test suite, and write a reviewer-ready PR description. Use whenever the user asks to "bump", "upgrade", "update", or "pull up" torch-spyre — typically after new `ibm-deeptools` / `ibm-flex` / `ibm-senlib` packages land that unblock previously-failing torch-spyre commits. Encodes that build failures are the expected signal that supporting libs need a matching bump, that the torchinductor cache must be wiped after the bump to avoid `TypeError: ...__init__() got an unexpected keyword argument ...` red herrings, and the curated PR-description shape (notable upstream PRs + bisect table + installed `ibm-*` RPM versions).
+description: Bump the pinned `torch-spyre` git rev in `pyproject.toml` and update `spyre-rpms.lock` to match the host's installed RPMs, binary-search to the latest commit that actually compiles against this host's `ibm-*` RPMs, clear the stale inductor cache, run the full test suite, and write a reviewer-ready PR description. Use whenever the user asks to "bump", "upgrade", "update", or "pull up" torch-spyre — typically after new `ibm-deeptools` / `ibm-flex` / `ibm-senlib` packages land that unblock previously-failing torch-spyre commits. Encodes that build failures are the expected signal that supporting libs need a matching bump, that the torchinductor cache must be wiped after the bump to avoid `TypeError: ...__init__() got an unexpected keyword argument ...` red herrings, and the curated PR-description shape (notable upstream PRs + bisect table + installed `ibm-*` RPM versions).
 ---
 
 # Upgrade torch-spyre
@@ -157,7 +157,106 @@ Expect ~18 minutes wall-clock. Triage failures:
 - Numerical mismatches, fallback-warning storms, compile errors on `spyre` → real regressions introduced by the bump. Hand to [[debug-spyre]].
 - A handful of `tests/test_distributed_tp2.py` / `tests/test_vllm_spyre_next.py` failures with the same root cause → probably one upstream change touched a path used by all of them. Read one traceback, fix once.
 
-### 6. Capture installed `ibm-*` package versions
+### 6. Update `spyre-rpms.lock`
+
+The torch-spyre bump typically coincides with newer `ibm-*` RPMs on the build host. Update the lock file to match what's installed (which the tests just passed against).
+
+#### Read installed RPMs
+
+```bash
+rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' 'ibm-*' \
+  | grep -v '(none)' \
+  | grep -E '^ibm-(deeptools|flex|senlib|spyre-comms|aiu-toolbox)' \
+  | sort > /tmp/new-rpms.txt
+cp spyre-rpms.lock spyre-rpms.lock.old
+```
+
+#### Sanity-check: no accidental downgrades
+
+Compare build numbers between old and new lock files. The version format is:
+
+```
+ibm-flex-2.0.0-0.main.1+377.61d25cc_142.el10
+                         ^^^
+                         commit count — monotonically increasing on main
+```
+
+Extract and compare:
+
+```bash
+parse_base() {
+  # "ibm-flex-devel-2.0.0-0.main..." → "ibm-flex-devel"
+  echo "$1" | grep -oP '^.+?(?=-\d+\.\d+\.\d+)'
+}
+parse_build_num() {
+  # "ibm-flex-2.0.0-0.main.1+377.61d25cc_142.el10" → "377"
+  echo "$1" | grep -oP '(?<=\+)\d+(?=\.)'
+}
+
+echo "=== Downgrade check ==="
+while IFS= read -r old_line; do
+  base=$(parse_base "$old_line")
+  old_num=$(parse_build_num "$old_line")
+  new_line=$(grep "^${base}-[0-9]" /tmp/new-rpms.txt | head -1)
+  if [[ -z "$new_line" ]]; then
+    echo "WARNING: $base not found in new RPMs (removed from host?)"
+    continue
+  fi
+  new_num=$(parse_build_num "$new_line")
+  if [[ "$new_num" -lt "$old_num" ]]; then
+    echo "WARNING: $base downgraded: $old_num → $new_num"
+  else
+    echo "OK: $base $old_num → $new_num"
+  fi
+done < <(grep -v '^[[:space:]]*#' spyre-rpms.lock.old | grep -v '^[[:space:]]*$')
+```
+
+Downgrade warnings are informational — the user may intentionally roll back — but confirm before proceeding.
+
+#### Write the new lock file
+
+```bash
+cat > spyre-rpms.lock <<'HEADER'
+# Pinned Spyre RPM package names, one per line.
+# Lines starting with # are ignored.
+# Specify exact versions to pin (e.g. ibm-deeptools-1.2.3-1.el8).
+# The cache key is derived from this file's hash. Changing any entry
+# invalidates the GHA RPM cache and triggers a fresh download.
+#
+HEADER
+cat /tmp/new-rpms.txt >> spyre-rpms.lock
+```
+
+Clean up: `rm spyre-rpms.lock.old`
+
+#### Optional: git-level ancestry verification
+
+If `gh` is authenticated to `github.ibm.com`, verify that the new commit SHA is a descendant of the old one for packages with known repos:
+
+| Lock file prefix | github.ibm.com repo |
+|---|---|
+| `ibm-deeptools` / `ibm-deeptools-devel` | `ai-chip-toolchain/deeptools` |
+| `ibm-flex` / `ibm-flex-devel` | `ai-chip-toolchain/flex` |
+| `ibm-spyre-comms` / `ibm-spyre-comms-*` | `ai-chip-toolchain/spyre-comms` |
+| `ibm-aiu-toolbox-e2e` | `ai-chip-toolchain/aiu-toolbox` |
+
+Extract the 7-char short SHA from the release field (`0.main.1+377.61d25cc_142` → `61d25cc`) and verify:
+
+```bash
+# Example for flex:
+gh api --hostname github.ibm.com \
+  "repos/ai-chip-toolchain/flex/compare/${OLD_SHA}...${NEW_SHA}" \
+  --jq '.status' 2>/dev/null
+# "ahead" or "diverged" = OK (new is newer). "behind" = downgrade. "identical" = no change.
+```
+
+Skip this check silently if `gh auth status --hostname github.ibm.com` fails (not all environments have internal GH auth).
+
+#### Cache population
+
+The `populate-rpm-cache` workflow fires automatically via `pull_request_target` when `spyre-rpms.lock` changes, so no manual action is needed — opening the PR is sufficient.
+
+### 7. Capture installed `ibm-*` package versions
 
 For the PR description, snapshot the RPMs that defined the build boundary:
 
@@ -167,7 +266,7 @@ rpm -qa 'ibm-*' 2>/dev/null | sort
 
 This makes the build boundary reproducible — the next person bumping can tell at a glance whether their host has newer libs (and therefore should retry the commits this PR skipped).
 
-### 7. Write the PR description
+### 8. Write the PR description
 
 Write to `PR_torch_spyre_bump.md`. Follow `.github/pull_request_template.md`:
 
@@ -200,6 +299,7 @@ Bumps `torch-spyre` from `<old-sha>` to `<new-sha>` — <K> of the <N> upstream 
 - [x] `uv lock` resolves cleanly to `<new-sha>`
 - [x] `uv sync --frozen` builds the torch-spyre C++ extension successfully
 - [x] `uv run --no-sync pytest` — **<P> passed, <S> skipped, <F> failed**
+- [x] `spyre-rpms.lock` updated — no downgrades (build-number check passed)
 - [x] <note about inductor cache, if it bit you>
 
 **Reviewer note:** when pulling this branch onto an existing checkout, `rm -rf /tmp/torchinductor_*` before running tests — the cache bakes in references to internals that were renamed/removed across the bump.
@@ -210,6 +310,7 @@ Bumps `torch-spyre` from `<old-sha>` to `<new-sha>` — <K> of the <N> upstream 
 
 - `pyproject.toml` (the rev string)
 - `uv.lock` (re-locked twice — once for the rev, plus uv may bump transitives)
+- `spyre-rpms.lock` (updated to match host's installed `ibm-*` RPMs)
 - `PR_torch_spyre_bump.md` (scratch description for the user to paste)
 
 Nothing in `spyre_inference/` should change during a pure bump. If you find yourself editing the package, you've crossed into "the bump exposed a regression" territory — stop, save state, and triage with [[debug-spyre]].
