@@ -276,7 +276,7 @@ def _create_compilable_page_attn(num_blocks: int, padded_query_len: int):
             )
             scores *= scale
             scores = scores + mask_tile
-            scores_max = scores.max(dim=-1, keepdim=True)[0]
+            scores_max = torch.amax(scores, dim=-1, keepdim=True)
 
             if i == 0:
                 tile_max = scores_max
@@ -514,7 +514,10 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        apply_causal_mask = common_attn_metadata.causal and max_query_len > 1
+        causal = common_attn_metadata.causal
+        if isinstance(causal, torch.Tensor):
+            causal = bool(causal.item())
+        apply_causal_mask = causal and max_query_len > 1
 
         aligned_max_query_len = (
             (max_query_len + QUERY_CHUNK_SIZE - 1) // QUERY_CHUNK_SIZE * QUERY_CHUNK_SIZE
