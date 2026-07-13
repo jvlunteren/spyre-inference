@@ -53,7 +53,6 @@ with profile(
     outputs = llm.generate(prompts, samplings)
 
 # Optional terminal summary
-print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20)
-      .replace("CUDA", "AIU"))
+print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20).replace("CUDA", "AIU"))
 
 os._exit(0)  # avoids TimestampCalibrator abort at teardown
