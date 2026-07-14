@@ -346,7 +346,7 @@ def ref_attn(
         pytest.param(torch.float16, id="dtype(fp16)"),
     ],
 )
-@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize(
     "num_blocks",
     [
