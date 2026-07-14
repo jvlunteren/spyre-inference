@@ -524,6 +524,7 @@ def test_spyre_attn(
     if configure_device == "spyre":
         del k_pages, v_pages, kv_cache, output
         import gc
+
         gc.collect()
 
 
