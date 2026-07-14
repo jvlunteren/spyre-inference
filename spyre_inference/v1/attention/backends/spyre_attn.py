@@ -275,6 +275,7 @@ def _create_compilable_page_attn(
                 # ALiBi bias slope[h] * (kv_pos - context_len). The additive
                 # mask_tile below uses finfo.min for masked positions, so this
                 # bias cannot un-mask them.
+                assert alibi_bias_tiles is not None
                 scores = scores + alibi_bias_tiles[i]
             scores = scores + mask_tile
             scores_max = torch.amax(scores, dim=-1, keepdim=True)
