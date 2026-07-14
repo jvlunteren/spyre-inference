@@ -263,7 +263,7 @@ def _create_compilable_page_attn(
                 # positions still map cleanly to -inf.
                 scores = torch.tanh(scores / logits_soft_cap) * logits_soft_cap
             scores = scores + mask_tile
-            scores_max = scores.max(dim=-1, keepdim=True)[0]
+            scores_max = torch.amax(scores, dim=-1, keepdim=True)
 
             if i == 0:
                 tile_max = scores_max
