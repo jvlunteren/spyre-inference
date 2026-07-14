@@ -224,9 +224,10 @@ def _alibi_slopes(num_heads: int) -> list[float]:
     For power-of-two head counts, uses the geometric sequence from the paper.
     For non-power-of-two counts, interleaves the next power-of-two sequence.
     """
+
     def _pow2(n: int) -> list[float]:
         start = 2 ** (-(2 ** -(math.log2(n) - 3)))
-        return [start * (start ** i) for i in range(n)]
+        return [start * (start**i) for i in range(n)]
 
     if math.log2(num_heads).is_integer():
         return _pow2(num_heads)

@@ -215,7 +215,9 @@ def _create_compilable_reshape_and_cache(num_tokens: int):
 
 
 def _create_compilable_page_attn(
-    num_blocks: int, padded_query_len: int, has_alibi: bool = False,
+    num_blocks: int,
+    padded_query_len: int,
+    has_alibi: bool = False,
 ):
     """Create online softmax attention over a fixed number of pages for torch.compile.
 
@@ -224,7 +226,12 @@ def _create_compilable_page_attn(
     """
 
     def specialized_paged_attn_kernel(
-        q, k_pages, v_pages, page_indices, mask_tiles, scale,
+        q,
+        k_pages,
+        v_pages,
+        page_indices,
+        mask_tiles,
+        scale,
         alibi_bias_tiles=None,
     ):
         """
@@ -673,8 +680,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             slopes_t = torch.tensor(alibi_slopes, dtype=torch.float16)
             if slopes_t.numel() != num_heads:
                 raise ValueError(
-                    f"alibi_slopes must have length num_heads={num_heads}, "
-                    f"got {slopes_t.numel()}"
+                    f"alibi_slopes must have length num_heads={num_heads}, got {slopes_t.numel()}"
                 )
             self.alibi_slopes: torch.Tensor | None = slopes_t.view(
                 num_kv_heads, self.num_queries_per_kv, 1, 1
@@ -706,7 +712,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         if key not in self._attn_fns:
             self._attn_fns[key] = _maybe_compile(
                 _create_compilable_page_attn(
-                    num_blocks, padded_query_len,
+                    num_blocks,
+                    padded_query_len,
                     has_alibi=self.alibi_slopes is not None,
                 )
             )
@@ -897,7 +904,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                 alibi_bias_tiles = []
                 for b in range(num_blocks_needed):
                     kv_pos = torch.arange(
-                        b * block_size, (b + 1) * block_size,
+                        b * block_size,
+                        (b + 1) * block_size,
                         dtype=torch.float16,
                     )
                     rel = (kv_pos - context_len).view(1, 1, 1, block_size)
@@ -908,7 +916,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             q_dev = convert(q, device=_target_device)
             attn_fn = self._get_attn_fn(num_blocks_needed, aligned_max_query_len)
             result = attn_fn(
-                q_dev, k_pages, v_pages, page_indices, mask_tiles, self.scale,
+                q_dev,
+                k_pages,
+                v_pages,
+                page_indices,
+                mask_tiles,
+                self.scale,
                 alibi_bias_tiles=alibi_bias_tiles,
             )
 
