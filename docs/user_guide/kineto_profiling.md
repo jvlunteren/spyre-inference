@@ -424,46 +424,7 @@ Kineto captures per-op timings inside a bounded profiling window;
 across the whole run. This surfaces long idle gaps, DMA saturation,
 and thermal throttling that a short profiler window would miss.
 
-`aiu-smi` ships in the `aiu-monitor` package on IBM Artifactory
-(`sys-power-hpc-pypi-local`). Access requires a credentialed
-`~/.netrc` entry for `na.artifactory.swg-devops.com`.
-
-### 6.1 Installation
-
-Access to SWG JFrog Artifactory is required (raise access
-[here](https://github.ibm.com/ai-chip-toolchain/aiu-release-information/wiki/SWAT-Access-to-AIU-Development-Resources#Artifactory-Access));
-your ARTIFACTORY username (usually IBM email) and token are needed to
-download the wheel (click "Set Me Up"
-[here](https://na.artifactory.swg-devops.com/ui/repos/tree/General/sys-power-hpc-pypi-local)
-to generate a token). Other available versions can be browsed at
-[this link](https://na.artifactory.swg-devops.com/ui/native/sys-power-hpc-pypi-local/aiu-monitor/x86_64/stable).
-
-Create or edit `~/.netrc` with your credentials:
-
-```
-machine na.artifactory.swg-devops.com
-login <your-email>
-password <your-token>
-```
-
-Set file permissions:
-
-```bash
-chmod 600 ~/.netrc
-```
-
-Install the package:
-
-```bash
-uv pip install https://na.artifactory.swg-devops.com/artifactory/api/pypi/sys-power-hpc-pypi-local/aiu-monitor/x86_64/stable/1.0.0/aiu_monitor-1.0.0-py39-none-linux_x86_64.whl
-uv pip install psutil
-```
-
-Requires `/opt/ibm/spyre/runtime/lib/libaiupti.so` on the target host —
-the same AIU hardware performance-counter library the kineto-patched
-torch wheel binds against (section 1.1).
-
-### 6.2 Two-terminal recipe
+### 6.1 Two-terminal recipe
 
 `aiu-smi` reads counters from a metric file that the workload process
 writes. `SENLIB_DEVEL_CONFIG_FILE` must be exported in **both**
@@ -497,7 +458,7 @@ Sample output:
   0 20260715  11:45:28    828.3     5.2   75     42   87    4.2    3.1    0.8    0.2     1.2     0.9     512
 ```
 
-### 6.3 Column reference
+### 6.2 Column reference
 
 | Column | Meaning |
 |---|---|
@@ -509,7 +470,7 @@ Sample output:
 | `rsvmem` | Reserved HBM (MB). Under-reports in `aiu-monitor` 1.0.0. |
 | `hostcpu` | Host CPU %, summed across cores (~800% on 8 cores is normal). |
 
-### 6.4 Useful options
+### 6.3 Useful options
 
 ```bash
 aiu-smi -d 2               # poll every 2 seconds (default 1s)
@@ -522,7 +483,7 @@ CSV output pairs well with a Kineto trace: run `aiu-smi -s -f run.csv`
 alongside a profiled `generate()` and the row timestamps align to the
 Perfetto trace window.
 
-### 6.5 Known limitations
+### 6.4 Known limitations
 
 - PF (physical-function) mode only; VF mode is unsupported by
   `aiu-monitor` 1.0.0.
