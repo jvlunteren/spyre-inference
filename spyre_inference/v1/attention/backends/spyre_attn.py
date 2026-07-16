@@ -18,6 +18,8 @@ import functools
 from dataclasses import dataclass
 from typing import Callable, ClassVar, NamedTuple
 
+import os
+
 import torch
 
 from spyre_inference.custom_ops.utils import convert
@@ -66,7 +68,6 @@ def _record_function(name: str):
 # on Spyre, where CompilationMode.NONE otherwise makes _maybe_compile a no-op.
 # Default: off (unset or "0").
 _FORCE_COMPILE_ATTN = os.environ.get("SPYRE_FORCE_COMPILE_ATTN", "0") == "1"
-
 
 # TODO: Make these hyperparameters configurable
 # KV length alignment: KV tensors are padded to the next multiple of this value.
@@ -212,6 +213,21 @@ def _maybe_compile(fn):
     if cfg.mode == CompilationMode.NONE or cfg.backend == "eager":
         return fn
     return torch.compile(fn, dynamic=False)
+
+
+def _maybe_compile_attn(fn):
+    """Like _maybe_compile, but also honors the SPYRE_FORCE_COMPILE_ATTN
+    escape hatch.
+
+    Used only for the online-softmax attention kernel — the reshape/cache
+    kernel is *not* covered, because forcing compile on it currently hits an
+    unsupported torch-spyre Inductor path (missing device_tensor_layout on
+    graph input). Flip _get_reshape_fn to call this helper too once that gap
+    is resolved.
+    """
+    if _FORCE_COMPILE_ATTN:
+        return torch.compile(fn, dynamic=False)
+    return _maybe_compile(fn)
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +708,12 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
     def _get_reshape_fn(self, num_tokens: int):
         if num_tokens not in self._reshape_fns:
+            # Deliberately uses _maybe_compile (not _maybe_compile_attn):
+            # SPYRE_FORCE_COMPILE_ATTN must not force-compile this kernel.
+            # torch.compile of _create_compilable_reshape_and_cache currently
+            # fails inside torch-spyre's Inductor pass with
+            # `Unsupported: missing device_tensor_layout on graph input arg0_1`.
+            # Move to _maybe_compile_attn once that gap is resolved.
             self._reshape_fns[num_tokens] = _maybe_compile(
                 _create_compilable_reshape_and_cache(num_tokens)
             )
@@ -700,7 +722,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
     def _get_attn_fn(self, num_blocks: int, padded_query_len: int):
         key = (num_blocks, padded_query_len)
         if key not in self._attn_fns:
-            self._attn_fns[key] = _maybe_compile(
+            self._attn_fns[key] = _maybe_compile_attn(
                 _create_compilable_page_attn(num_blocks, padded_query_len)
             )
         return self._attn_fns[key]
