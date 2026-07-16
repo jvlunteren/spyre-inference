@@ -316,6 +316,7 @@ def _run_spyre_attn_test(
     sliding_window: int | None,
     configure_compilation: str,
     configure_device: str,
+    use_alibi: bool = False,
 ) -> None:
     """Shared test body: validate SpyreAttentionImpl against a reference implementation."""
     # TODO: STOCK_TORCH_COMPILE + device_spyre, currently fails with
@@ -439,6 +440,7 @@ def _run_spyre_attn_test(
         scale=scale,
         sliding_window=sliding_window,
         soft_cap=None,
+        alibi_slopes=alibi_slopes,
     )
 
     if max(query_lens) >= 32:
@@ -595,6 +597,47 @@ def test_spyre_attn_sliding_window(
         sliding_window=sliding_window,
         configure_compilation=configure_compilation,
         configure_device=configure_device,
+    )
+
+
+@pytest.mark.parametrize(
+    "configure_device",
+    [
+        pytest.param("cpu", id="device_cpu"),
+        pytest.param("spyre", id="device_spyre"),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "configure_compilation",
+    [
+        pytest.param("NONE", id="compilation_NONE"),
+        pytest.param("STOCK_TORCH_COMPILE", id="compilation_STOCK"),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param([(1, 256)], id="decode(q=1,kv=256)"),
+        pytest.param([(32, 256)], id="prefill(q=32,kv=256)"),
+        pytest.param([(1, 256), (1, 512)], id="batch_decode(2seqs)"),
+    ],
+)
+def test_spyre_attn_alibi(
+    default_vllm_config,
+    seq_lens: list[tuple[int, int]],
+    configure_compilation: str,
+    configure_device: str,
+) -> None:
+    """ALiBi positional bias correctness."""
+    _run_spyre_attn_test(
+        seq_lens=seq_lens,
+        block_size=128,
+        sliding_window=None,
+        configure_compilation=configure_compilation,
+        configure_device=configure_device,
+        use_alibi=True,
     )
 
 
