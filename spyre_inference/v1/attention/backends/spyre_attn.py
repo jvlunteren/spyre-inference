@@ -241,11 +241,12 @@ def _create_compilable_page_attn(
     num_blocks: int,
     padded_query_len: int,
     has_alibi: bool = False,
+    logits_soft_cap: float = 0.0,
 ):
     """Create online softmax attention over a fixed number of pages for torch.compile.
 
-    Dynamo unrolls the loop because num_blocks, padded_query_len, and has_alibi
-    are closure constants.
+    Dynamo unrolls the loop because num_blocks, padded_query_len, has_alibi, and
+    logits_soft_cap are closure constants.
     """
 
     def specialized_paged_attn_kernel(
@@ -294,6 +295,11 @@ def _create_compilable_page_attn(
                 q, None, k_pages, page_idx, transform_b=lambda t: t.unsqueeze(1).transpose(-2, -1)
             )
             scores *= scale
+            if logits_soft_cap > 0.0:
+                # Pull logits into (-cap, +cap) before the mask add so masked
+                # positions still map cleanly to -inf. Applied before the ALiBi
+                # bias so the positional term is not squashed by the tanh.
+                scores = torch.tanh(scores / logits_soft_cap) * logits_soft_cap
             if has_alibi:
                 # ALiBi bias slope[h] * (kv_pos - context_len). The additive
                 # mask_tile below uses finfo.min for masked positions, so this
@@ -712,15 +718,17 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         else:
             self.alibi_slopes = None
 
+        # Normalise the API's Optional[float] into a plain float so the kernel
+        # can bake it as a closure constant. logits_soft_cap == 0.0 disables
+        # soft-capping (kernel takes the same path as upstream).
+        self.logits_soft_cap: float = 0.0 if logits_soft_cap is None else float(logits_soft_cap)
+
         # Compiled function caches (keyed by iteration count for reshape, and
         # by (num_blocks, padded_query_len) for the per-page attention loop)
         self._reshape_fns: dict[int, object] = {}
         self._attn_fns: dict[tuple[int, int], object] = {}
 
         logger.debug_once("Using SpyreAttentionBackend with LIST-BASED online softmax")
-
-        if logits_soft_cap is not None:
-            raise NotImplementedError("Logits soft cap not supported yet")
 
     def _get_reshape_fn(self, num_tokens: int):
         if num_tokens not in self._reshape_fns:
@@ -736,8 +744,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         return self._reshape_fns[num_tokens]
 
     def _get_attn_fn(self, num_blocks: int, padded_query_len: int):
-        # self.alibi_slopes is fixed None-or-tensor per instance, so
-        # has_alibi doesn't need to be part of the cache key.
+        # self.alibi_slopes and self.logits_soft_cap are fixed per instance, so
+        # has_alibi and logits_soft_cap don't need to be part of the cache key.
         key = (num_blocks, padded_query_len)
         if key not in self._attn_fns:
             self._attn_fns[key] = _maybe_compile_attn(
@@ -745,6 +753,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                     num_blocks,
                     padded_query_len,
                     has_alibi=self.alibi_slopes is not None,
+                    logits_soft_cap=self.logits_soft_cap,
                 )
             )
         return self._attn_fns[key]
