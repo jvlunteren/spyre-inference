@@ -44,19 +44,18 @@ logger = init_logger(__name__)
 
 # When set, wraps forward(), _reshape_and_cache(), and _online_softmax_attention()
 # in torch.profiler.record_function spans for kineto trace capture.
-_ATTN_PROFILING = False
+_ATTN_PROFILING = os.environ.get("SPYRE_ATTN_PROFILING", "0") == "1"
 
 
 def _record_function(name: str):
-    """Decorator that wraps a method in a profiler span when _ATTN_PROFILING is set."""
-
     def decorator(fn):
+        if not _ATTN_PROFILING:
+            return fn
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            if _ATTN_PROFILING:
-                with torch.profiler.record_function(name):
-                    return fn(*args, **kwargs)
-            return fn(*args, **kwargs)
+            with torch.profiler.record_function(name):
+                return fn(*args, **kwargs)
 
         return wrapper
 
