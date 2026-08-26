@@ -793,6 +793,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#encoder-embedding-models-target-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoder / embedding models: target state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#device-placement-strategy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -804,10 +815,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hf-adapters-transformers-backend" class="md-nav__link">
+  <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
-        HF-adapters Transformers backend
+        Transformers backend
       
     </span>
   </a>
@@ -1557,6 +1568,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#encoder-embedding-models-target-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoder / embedding models: target state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#device-placement-strategy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1568,10 +1590,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hf-adapters-transformers-backend" class="md-nav__link">
+  <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
-        HF-adapters Transformers backend
+        Transformers backend
       
     </span>
   </a>
@@ -1950,6 +1972,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#encoder-embedding-models-target-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoder / embedding models: target state
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#device-placement-strategy" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1961,10 +1994,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#hf-adapters-transformers-backend" class="md-nav__link">
+  <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
-        HF-adapters Transformers backend
+        Transformers backend
       
     </span>
   </a>
@@ -2020,7 +2053,7 @@ ops injected via OOT registration.</p>
     indicate inheritance; solid arrows indicate composition or dependency.
   </figcaption>
 </figure>
-<p>The plugin registers via three entry points:</p>
+<p>The plugin registers via two entry points:</p>
 <table>
 <thead>
 <tr>
@@ -2038,12 +2071,7 @@ ops injected via OOT registration.</p>
 <tr>
 <td><code>vllm.general_plugins</code></td>
 <td><code>spyre_inference:register_ops</code></td>
-<td>Calls <code>register_all()</code> — importing the ops package triggers every <code>@register_oot()</code> layer swap, and <code>register_all()</code> additionally registers the <code>spyre_convert</code> and <code>spyre_vocab_mask</code> custom ops (RoPE registers no op — its rotation runs in-graph)</td>
-</tr>
-<tr>
-<td><code>vllm.general_plugins</code></td>
-<td><code>spyre_inference:register_hf_adapters</code></td>
-<td>Overrides vLLM's <code>TransformersForCausalLM</code> with <code>HfAdaptersForCausalLM</code> so <code>model_impl="transformers"</code> uses hf-adapters (matmul-based RoPE) on Spyre</td>
+<td>Calls <code>register_all()</code> — importing the ops package triggers every <code>@register_oot()</code> layer swap, and <code>register_all()</code> additionally registers the <code>spyre_convert</code> and <code>spyre_vocab_mask</code> custom ops (RoPE registers no op — its rotation runs in-graph). Also overrides vLLM's <code>TransformersForCausalLM</code> with <code>SpyreTransformersForCausalLM</code></td>
 </tr>
 </tbody>
 </table>
@@ -2258,6 +2286,26 @@ the full sequence — so it skips the paged-cache machinery entirely and instead
 <li>Scatters the unpadded results back to CPU, then writes them per token into the Spyre
    output buffer.</li>
 </ol>
+<h2 id="encoder-embedding-models-target-state">Encoder / embedding models: target state<a class="headerlink" href="#encoder-embedding-models-target-state" title="Permanent link">&para;</a></h2>
+<p>Everything above describes what is implemented today. The diagram below is a <strong>target
+state</strong> — where the encoder path is heading once the compile-mode work lands, and not a
+description of current behaviour.</p>
+<p>The shape of that target: the model body compiled once per token bucket, attention
+shape-managed separately behind the opaque custom-op boundary, and a warmup that walks
+both shape ladders so nothing compiles on the first request.</p>
+<figure>
+  <img alt="Encoder target state" src="encoder-ideal-state.svg" style="width: 140%; max-width: 1400px; margin-left: -20%" />
+<br />
+<figcaption>
+    Target architecture for encoder / embedding models under
+    <code>STOCK_TORCH_COMPILE</code>. Two shape axes are bucketed independently: the
+    token count <code>T</code> for the model body, and <code>(S, L)</code> for
+    attention's dense grid — they are decoupled because attention builds its grid by
+    gathering rows rather than by being handed a reshaped tensor. The foot of the
+    diagram contrasts today's dense-grid strategy with the planned flash-style variant,
+    which would collapse the second axis and converge on the upstream design.
+  </figcaption>
+</figure>
 <h2 id="device-placement-strategy">Device Placement Strategy<a class="headerlink" href="#device-placement-strategy" title="Permanent link">&para;</a></h2>
 <p><code>TorchSpyreModelRunner</code> inherits from vLLM's <code>GPUModelRunner</code> and treats Spyre as the
 "GPU" in the <code>CpuGpuBuffer</code> pattern. Buffers are created via a <code>SpyreCpuGpuBuffer</code>
@@ -2296,15 +2344,23 @@ and <code>all_reduce</code>.</p>
 operations that Spyre doesn't yet support natively (the per-sequence
 attention varlen loop, logits indexing). RoPE's rotation-cache gather and the embedding
 gather both run on-device now, so neither is among them.</p>
-<h2 id="hf-adapters-transformers-backend">HF-adapters Transformers backend<a class="headerlink" href="#hf-adapters-transformers-backend" title="Permanent link">&para;</a></h2>
-<p>When <code>model_impl="transformers"</code>, the <code>register_hf_adapters</code> general plugin swaps vLLM's
-<code>TransformersForCausalLM</code> for <code>HfAdaptersForCausalLM</code> (<code>spyre_inference/hf_adapters.py</code>).
-vLLM's stock Transformers backend still handles model creation, weight loading, attention
-routing, the KV cache, and scheduling; the Spyre OOT layers above apply automatically at
-instantiation. The adapter's main job is to replace HF's <code>RotaryEmbedding</code> with a
-matmul-based RoPE (<code>apply_rope_matmul</code>), padding Q/K into a stick-aligned dimension for
-the rotation when <code>head_dim/2</code> is not a multiple of the Spyre block size and contracting
-back afterward.</p>
+<h2 id="transformers-backend">Transformers backend<a class="headerlink" href="#transformers-backend" title="Permanent link">&para;</a></h2>
+<p>When <code>model_impl="transformers"</code>, <code>register_ops</code> swaps vLLM's <code>TransformersForCausalLM</code>
+for <code>SpyreTransformersForCausalLM</code> (<code>spyre_inference/transformers_backend.py</code>). vLLM's
+stock Transformers backend still handles model creation, weight loading, attention
+routing, the KV cache, and scheduling, and its fusers replace HF's linear/norm/GLU
+modules with vLLM layers — which the OOT registrations above then pick up automatically.</p>
+<p>The subclass covers what upstream leaves to HF's module code. There is no RoPE fuser, so
+HF's <code>rotary_emb</code> survives and would derive cos/sin inside the forward from int64
+<code>position_ids</code>, a cast torch-spyre cannot lower. It is replaced with a precomputed
+<code>[max_model_len, 2, 2, head_dim/2]</code> rotation cache — built on the host and moved to the
+device before compile, leaving only an <code>index_select</code> in the graph — plus a matmul-based
+<code>apply_rotary_pos_emb</code>. Head padding is shared with the native path: the platform widens
+<code>head_dim</code> and the weight passes in <code>head_pad.py</code> pad Q/K interleaved, so this backend
+only has to rebuild the rotation cache at the pre-pad frequencies.</p>
+<p>Because the fusers key on class names, the OOT registry also covers the fused norms
+(<code>SpyreTPAwareRMSNorm</code>, <code>SpyreTPAwareGemmaRMSNorm</code>); otherwise they fall back to
+<code>forward_native</code> and its fp32 promotion.</p>
 <h2 id="distributed-tp">Distributed (TP)<a class="headerlink" href="#distributed-tp" title="Permanent link">&para;</a></h2>
 <p><code>TorchSpyrePlatform.get_device_communicator_cls</code> returns <code>SpyreCommunicator</code>, a
 <code>DeviceCommunicatorBase</code> override in
