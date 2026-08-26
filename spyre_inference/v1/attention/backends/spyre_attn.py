@@ -474,7 +474,7 @@ class SpyreAttentionMetadata(AttentionMetadata):
     query_row_ids_dev: torch.Tensor | None = None
     block_ids_padded_cpu: torch.Tensor | None = None  # [B_seqs * B_blocks] int32
     block_ids_padded_dev: torch.Tensor | None = None
-    mask_by_block_cpu: torch.Tensor | None = None  # [B_blocks, B_seqs, block_size] fp16
+    mask_by_block_cpu: torch.Tensor | None = None  # [B_blocks, B_seqs * KV, 1, 1, block_size] fp16
     mask_by_block_dev: torch.Tensor | None = None
 
     @property
@@ -908,7 +908,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     ]
 
                 # -inf on padded rows/blocks and past-kv-len positions; 0 on
-                # valid positions. Pre-permuted to [B_blocks, B_seqs, block_size].
+                # valid positions. Broadcast to KV heads and reshape to the
+                # kernel input shape [B_blocks, B_seqs * KV, 1, 1, block_size].
                 mask_bs_bb = torch.full(
                     (b_seqs, b_blocks, block_size),
                     float("-inf"),
@@ -918,7 +919,14 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     n_use = min(num_active[s], b_blocks)
                     for b in range(n_use):
                         mask_bs_bb[s, b] = attention_mask_tiles[s][b][0]
-                mask_by_block_cpu = mask_bs_bb.permute(1, 0, 2).contiguous()
+                mask_by_block_cpu = (
+                    mask_bs_bb.permute(1, 0, 2)
+                    .unsqueeze(2)
+                    .unsqueeze(3)
+                    .expand(b_blocks, b_seqs, self.num_kv_heads, 1, block_size)
+                    .reshape(b_blocks, b_seqs * self.num_kv_heads, 1, 1, block_size)
+                    .contiguous()
+                )
 
         return SpyreAttentionMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
@@ -1309,18 +1317,10 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             .clone()
         )
 
-        # Broadcast the pre-permuted mask across KV heads once per forward.
-        # .reshape across an expanded dim forces materialization; the .clone()
-        # produces the offset-0 tensor the compiled kernel needs.
+        # Mask is already broadcast to KV heads and shaped by the builder;
+        # the per-block .clone() gives each slice offset 0 (torch-spyre#3770).
         mask_by_block = attn_metadata.mask_by_block_dev
-        mask_list_dev = [
-            mask_by_block[i]
-            .unsqueeze(1)
-            .expand(b_seqs, num_kv_heads, block_size)
-            .reshape(b_seqs * num_kv_heads, 1, 1, block_size)
-            .clone()
-            for i in range(b_blocks)
-        ]
+        mask_list_dev = [mask_by_block[i].clone() for i in range(b_blocks)]
 
         kernel = self._get_bucketed_decode_kernel(b_seqs, b_blocks)
         result = kernel(q_packed, k_list_dev, v_list_dev, mask_list_dev, self.scale)
