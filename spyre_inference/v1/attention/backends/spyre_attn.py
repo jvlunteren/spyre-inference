@@ -1283,30 +1283,34 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # Gather K/V for the whole padded batch, then split into a per-block
         # Python list. block_ids_padded_dev is flat by construction (see builder).
         block_ids_flat = attn_metadata.block_ids_padded_dev
-        k_gath = k_pages.index_select(0, block_ids_flat)
-        v_gath = v_pages.index_select(0, block_ids_flat)
-        k_by_block = (
-            k_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
-            .permute(1, 0, 3, 2, 4)
-            .contiguous()
-        )
-        v_by_block = (
-            v_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
-            .permute(1, 0, 3, 2, 4)
-            .contiguous()
-        )
-        # .clone() is load-bearing: k_by_block[i] / v_by_block[i] have
-        # storage_offset > 0 for i > 0, and a compiled Spyre kernel reads from
-        # offset 0 (torch-spyre#3770). TODO: pre-allocate a scatter-written
-        # buffer in the builder to avoid B_blocks copies per layer per step.
-        k_list_dev = [
-            k_by_block[i].reshape(b_seqs * num_kv_heads, 1, block_size, head_size).clone()
-            for i in range(b_blocks)
-        ]
-        v_list_dev = [
-            v_by_block[i].reshape(b_seqs * num_kv_heads, 1, block_size, head_size).clone()
-            for i in range(b_blocks)
-        ]
+        with torch.profiler.record_function("spyre_attn::bucketed_k_gather_reshape"):
+            k_gath = k_pages.index_select(0, block_ids_flat)
+            k_by_block = (
+                k_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
+                .permute(1, 0, 3, 2, 4)
+                .contiguous()
+            )
+            # .clone() is load-bearing: k_by_block[i] has storage_offset > 0 for
+            # i > 0, and a compiled Spyre kernel reads from offset 0
+            # (torch-spyre#3770). Pre-allocated staging tensors were profiled
+            # (2026-08-26): aten::clone budget = 7.00% of forward, but ~75% of
+            # that is memcpy which copy_() doesn't eliminate. Net saving ~1.75%
+            # of forward. Structural cost unjustified; keeping .clone() per-block.
+            k_list_dev = [
+                k_by_block[i].reshape(b_seqs * num_kv_heads, 1, block_size, head_size).clone()
+                for i in range(b_blocks)
+            ]
+        with torch.profiler.record_function("spyre_attn::bucketed_v_gather_reshape"):
+            v_gath = v_pages.index_select(0, block_ids_flat)
+            v_by_block = (
+                v_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
+                .permute(1, 0, 3, 2, 4)
+                .contiguous()
+            )
+            v_list_dev = [
+                v_by_block[i].reshape(b_seqs * num_kv_heads, 1, block_size, head_size).clone()
+                for i in range(b_blocks)
+            ]
 
         # Gather query rows and fold (B_seqs, KV) into the leading axis so the
         # kernel's matmul stays 4-D.
@@ -1319,8 +1323,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         # Mask is already broadcast to KV heads and shaped by the builder;
         # the per-block .clone() gives each slice offset 0 (torch-spyre#3770).
-        mask_by_block = attn_metadata.mask_by_block_dev
-        mask_list_dev = [mask_by_block[i].clone() for i in range(b_blocks)]
+        with torch.profiler.record_function("spyre_attn::bucketed_mask_list"):
+            mask_by_block = attn_metadata.mask_by_block_dev
+            mask_list_dev = [mask_by_block[i].clone() for i in range(b_blocks)]
 
         kernel = self._get_bucketed_decode_kernel(b_seqs, b_blocks)
         result = kernel(q_packed, k_list_dev, v_list_dev, mask_list_dev, self.scale)
