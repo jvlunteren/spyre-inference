@@ -1185,19 +1185,24 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # The KV write is not here: attn_layer.py traces it for the layers it splits,
         # and upstream's own unified_kv_cache_update op covers the rest.
 
-        # Mirror bucketed-decode precomputes to device once per step.
-        if attn_metadata.bucket_num_seqs is not None and attn_metadata.query_row_ids_dev is None:
+        # Mirror bucketed-decode precomputes to device once per step, only for
+        # layers whose impl can actually use the bucketed kernel (skips ALiBi
+        # and soft-cap layers).
+        if (
+            self._bucketed_decode_preconditions_met(attn_metadata)
+            and attn_metadata.query_row_ids_dev is None
+        ):
             assert attn_metadata.query_row_ids_cpu is not None
             assert attn_metadata.block_ids_padded_cpu is not None
             assert attn_metadata.mask_by_block_cpu is not None
             attn_metadata.query_row_ids_dev = convert(
-                attn_metadata.query_row_ids_cpu.contiguous(), device=_target_device
+                attn_metadata.query_row_ids_cpu, device=_target_device
             )
             attn_metadata.block_ids_padded_dev = convert(
-                attn_metadata.block_ids_padded_cpu.contiguous(), device=_target_device
+                attn_metadata.block_ids_padded_cpu, device=_target_device
             )
             attn_metadata.mask_by_block_dev = convert(
-                attn_metadata.mask_by_block_cpu.contiguous(), device=_target_device
+                attn_metadata.mask_by_block_cpu, device=_target_device
             )
 
         output = self._online_softmax_attention(
@@ -1256,7 +1261,6 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         v_pages: torch.Tensor,
         attn_metadata: SpyreAttentionMetadata,
         output: torch.Tensor,
-        _target_device: torch.device,
     ) -> None:
         # Spyre-lowering shapes drive several structural choices here:
         # (1) block_ids_padded_cpu is flat, not reshaped 2D → 1D, so no
@@ -1388,9 +1392,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         assert page_index_tables is not None, "page_index_tables must be mirrored by forward()"
 
         if self._bucketed_decode_preconditions_met(attn_metadata):
-            self._run_bucketed_decode_dispatch(
-                query_dev, k_pages, v_pages, attn_metadata, output, _target_device
-            )
+            self._run_bucketed_decode_dispatch(query_dev, k_pages, v_pages, attn_metadata, output)
             return output
 
         for seq_idx in range(num_seqs):
