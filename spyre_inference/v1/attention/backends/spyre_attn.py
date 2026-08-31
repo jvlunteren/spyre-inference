@@ -15,6 +15,7 @@
 """Paged KV-cache attention backend for Spyre using a dense page tensor and online softmax."""
 
 import bisect
+import contextlib
 import functools
 from dataclasses import dataclass
 from typing import ClassVar, NamedTuple
@@ -42,8 +43,10 @@ from spyre_inference.v1.attention import attn_layer
 
 logger = init_logger(__name__)
 
-# When set, wraps forward() and _online_softmax_attention()
-# in torch.profiler.record_function spans for kineto trace capture.
+# When set, wraps forward(), _online_softmax_attention() and the bucketed
+# decode K/V/mask gather blocks in torch.profiler.record_function spans for
+# kineto trace capture. Off by default: the spans are not free, so a profiled
+# run is not wall-clock comparable to a default one.
 _ATTN_PROFILING = envs.SPYRE_ATTN_PROFILING
 
 
@@ -60,6 +63,20 @@ def _record_function(name: str):
         return wrapper
 
     return decorator
+
+
+@contextlib.contextmanager
+def _record_block(name: str):
+    """Gated counterpart to _record_function for inline blocks.
+
+    Same SPYRE_ATTN_PROFILING gate; a no-op when profiling is off so the
+    span carries no cost on the default path.
+    """
+    if not _ATTN_PROFILING:
+        yield
+        return
+    with torch.profiler.record_function(name):
+        yield
 
 
 # TODO: Make these hyperparameters configurable
@@ -1287,7 +1304,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # Gather K/V for the whole padded batch, then split into a per-block
         # Python list. block_ids_padded_dev is flat by construction (see builder).
         block_ids_flat = attn_metadata.block_ids_padded_dev
-        with torch.profiler.record_function("spyre_attn::bucketed_k_gather_reshape"):
+        with _record_block("spyre_attn::bucketed_k_gather_reshape"):
             k_gath = k_pages.index_select(0, block_ids_flat)
             k_by_block = (
                 k_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
@@ -1304,7 +1321,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                 k_by_block[i].reshape(b_seqs * num_kv_heads, 1, block_size, head_size).clone()
                 for i in range(b_blocks)
             ]
-        with torch.profiler.record_function("spyre_attn::bucketed_v_gather_reshape"):
+        with _record_block("spyre_attn::bucketed_v_gather_reshape"):
             v_gath = v_pages.index_select(0, block_ids_flat)
             v_by_block = (
                 v_gath.reshape(b_seqs, b_blocks, block_size, num_kv_heads, head_size)
@@ -1327,7 +1344,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         # Mask is already broadcast to KV heads and shaped by the builder;
         # the per-block .clone() gives each slice offset 0 (torch-spyre#3770).
-        with torch.profiler.record_function("spyre_attn::bucketed_mask_list"):
+        with _record_block("spyre_attn::bucketed_mask_list"):
             mask_by_block = attn_metadata.mask_by_block_dev
             mask_list_dev = [mask_by_block[i].clone() for i in range(b_blocks)]
 
