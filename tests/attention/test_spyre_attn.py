@@ -14,6 +14,7 @@
 
 import math
 import warnings
+from collections import Counter
 from unittest.mock import Mock
 
 import pytest
@@ -29,6 +30,7 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     SpyreAttentionMetadataBuilder,
     SpyrePagedKVCache,
     _build_query_row_tables,
+    _create_compilable_bucketed_decode_attn,
 )
 
 pytestmark = pytest.mark.attention
@@ -1618,6 +1620,126 @@ def test_spyre_attn_bucketed_decode_correctness(
         sliding_window=None,
         configure_compilation=configure_compilation,
         configure_device=configure_device,
+    )
+
+
+@pytest.mark.parametrize(
+    "configure_device",
+    [pytest.param("spyre", id="device_spyre")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "configure_compilation",
+    [pytest.param("STOCK_TORCH_COMPILE", id="compilation_STOCK")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param(
+            [(1, 256), (1, 512), (1, 128), (1, 384), (1, 256), (1, 512), (1, 128), (1, 384)],
+            id="bucket_exact(N=8)",
+        ),
+        pytest.param(
+            [(1, 128), (1, 256), (1, 384), (1, 512), (1, 128)],
+            id="bucket_pad(N=5_bucket=8)",
+        ),
+        pytest.param(
+            [
+                (1, 128),
+                (1, 256),
+                (1, 384),
+                (1, 512),
+                (1, 128),
+                (1, 256),
+                (1, 384),
+                (1, 512),
+                (1, 128),
+            ],
+            id="bucket_pad(N=9_bucket=16)",
+        ),
+    ],
+)
+def test_spyre_attn_bucketed_decode_alibi(
+    default_vllm_config,
+    enable_bucketed_decode,
+    seq_lens: list[tuple[int, int]],
+    configure_compilation: str,
+    configure_device: str,
+) -> None:
+    """Bucketed decode with ALiBi, vs the per-seq reference."""
+    _run_spyre_attn_test(
+        seq_lens=seq_lens,
+        block_size=128,
+        sliding_window=None,
+        use_alibi=True,
+        configure_compilation=configure_compilation,
+        configure_device=configure_device,
+    )
+
+
+def test_bucketed_decode_alibi_disabled_adds_no_ops() -> None:
+    """`has_alibi=False` must add no ops: the branch is resolved at trace time.
+
+    Guards against `has_alibi` becoming a runtime argument, which would make every
+    non-ALiBi model pay for the compare and the bias ops.
+    """
+    torch.set_default_device("cpu")
+    set_random_seed(0)
+
+    num_seqs, num_blocks, num_kv_heads, qpk, block_size, head_size = 4, 2, 2, 1, 16, 8
+    n_pages = num_blocks * num_seqs
+    args = (
+        torch.randn(num_seqs, num_kv_heads * qpk * head_size),
+        torch.arange(num_seqs, dtype=torch.int64),
+        torch.randn(n_pages, block_size, num_kv_heads, head_size),
+        torch.randn(n_pages, block_size, num_kv_heads, head_size),
+        torch.arange(n_pages, dtype=torch.int64),
+        torch.zeros(num_blocks, num_seqs * num_kv_heads, 1, block_size),
+        1.0,
+    )
+
+    def graph_ops(has_alibi: bool) -> list[str]:
+        graphs: list = []
+        fn = _create_compilable_bucketed_decode_attn(
+            num_seqs=num_seqs,
+            num_blocks=num_blocks,
+            num_kv_heads=num_kv_heads,
+            num_queries_per_kv=qpk,
+            block_size=block_size,
+            head_size=head_size,
+            has_alibi=has_alibi,
+            needs_gather=False,
+        )
+        torch._dynamo.reset()
+        compiled = torch.compile(
+            fn, backend=lambda gm, _: (graphs.append(gm), gm.forward)[1], dynamic=False
+        )
+        extra = (
+            (
+                torch.zeros(num_blocks, num_seqs, 1, block_size),
+                torch.ones(num_kv_heads, qpk, 1, 1),
+            )
+            if has_alibi
+            else ()
+        )
+        compiled(*args, *extra)
+        return [
+            getattr(node.target, "__name__", str(node.target))
+            for node in graphs[0].graph.nodes
+            if node.op == "call_function"
+        ]
+
+    disabled = graph_ops(False)
+    enabled = graph_ops(True)
+
+    # A set difference, not named ops: Dynamo's naming for one source line varies
+    # with tracing context.
+    assert len(enabled) > len(disabled), "ALiBi added no ops when enabled"
+    extra = Counter(enabled) - Counter(disabled)
+    assert sum(extra.values()) == len(enabled) - len(disabled)
+    assert not Counter(disabled) - Counter(enabled), (
+        f"disabled graph has ops the enabled one lacks: {Counter(disabled) - Counter(enabled)}"
     )
 
 

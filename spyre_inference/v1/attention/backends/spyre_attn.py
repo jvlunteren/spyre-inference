@@ -344,6 +344,7 @@ def _create_compilable_bucketed_decode_attn(
     num_queries_per_kv: int,
     block_size: int,
     head_size: int,
+    has_alibi: bool = False,
     needs_gather: bool = True,
 ):
     """Bucketed decode kernel factory; gathers K/V and the query in-graph.
@@ -351,12 +352,25 @@ def _create_compilable_bucketed_decode_attn(
     One gather per tensor, not one per block: two multi-element `index_select`s on
     the same tensor in one graph exhaust every candidate output layout in
     torch-spyre's `_multi_arg_pointwise_layouts` and fail to compile.
+
+    `has_alibi` is a closure constant, so a model without ALiBi compiles a graph
+    with no bias ops at all rather than a skipped branch. The slopes themselves are
+    a runtime argument: they are per-layer, and the caller's `rel` tensor is shared
+    across layers.
     """
 
     lead = num_seqs * num_kv_heads
 
     def specialized_bucketed_decode_kernel(
-        query, query_row_ids, k_pages, v_pages, block_ids, mask_by_block, scale
+        query,
+        query_row_ids,
+        k_pages,
+        v_pages,
+        block_ids,
+        mask_by_block,
+        scale,
+        alibi_rel_by_block=None,
+        alibi_slopes=None,
     ):
         # Q=1 puts the sequences in rows 0..num_seqs-1; lanes past the batch are
         # -inf-masked and dropped by the caller, so any b_seqs-row prefix serves.
@@ -389,6 +403,14 @@ def _create_compilable_bucketed_decode_attn(
             mask_tile = mask_by_block[i].unsqueeze(1)
 
             scores = torch.matmul(q, k_page.transpose(-2, -1)) * scale
+            if has_alibi and alibi_rel_by_block is not None and alibi_slopes is not None:
+                # The query term is dropped: it is constant along the KV axis, so it
+                # cancels in the softmax. Slopes have no seq axis, so dim 1.
+                rel = alibi_rel_by_block[i].reshape(num_seqs, 1, 1, block_size)
+                bias = (alibi_slopes.view(1, num_kv_heads, num_queries_per_kv, 1) * rel).reshape(
+                    lead, num_queries_per_kv, 1, block_size
+                )
+                scores = scores + bias
             scores = scores + mask_tile
             scores_max = torch.amax(scores, dim=-1, keepdim=True)
 
@@ -522,6 +544,10 @@ class SpyreAttentionMetadata(AttentionMetadata):
     block_ids_padded_dev: torch.Tensor | None = None
     mask_by_block_cpu: torch.Tensor | None = None  # [B_blocks, B_seqs * KV, 1, block_size] fp16
     mask_by_block_dev: torch.Tensor | None = None
+    # Slope-free: kv_pos - context_len. Layer-independent, so it is shared like the
+    # mask; each layer scales it by its own ALiBi slopes.
+    alibi_rel_by_block_cpu: torch.Tensor | None = None  # [B_blocks, B_seqs, 1, block_size] fp16
+    alibi_rel_by_block_dev: torch.Tensor | None = None
 
     @property
     def query_lens(self) -> torch.Tensor:
@@ -558,6 +584,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             )
 
         model_config = vllm_config.model_config
+        # Gates the rel build: a non-ALiBi model does no host work for it.
+        self._model_uses_alibi: bool = model_config.uses_alibi
         self.num_heads = model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
         # `model_config.dtype` is typed `ModelDType | torch.dtype`, but
@@ -918,6 +946,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         query_row_ids_cpu = None
         block_ids_padded_cpu = None
         mask_by_block_cpu = None
+        alibi_rel_by_block_cpu = None
         if max_query_len == 1 and self.sliding_window is None and num_seqs >= _MIN_SEQS_BUCKET:
             b_seqs = _find_bucket(num_seqs, self._num_seqs_buckets)
             b_blocks = _find_bucket(max(num_active), self._num_blocks_buckets)
@@ -963,6 +992,21 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     .contiguous()
                 )
 
+                if self._model_uses_alibi:
+                    # Q=1 here, so context_len is kv_len - 1. Padded rows and
+                    # inactive blocks stay zero: they are -inf-masked, but a real
+                    # offset there would still reach amax.
+                    context_lens = (seq_lens[:num_seqs] - 1).to(torch.float16)
+                    kv_pos = torch.arange(b_blocks * block_size, dtype=torch.float16).view(
+                        b_blocks, block_size
+                    )
+                    rel_bs_bb = torch.zeros((b_seqs, b_blocks, block_size), dtype=torch.float16)
+                    rel_bs_bb[:num_seqs] = kv_pos.unsqueeze(0) - context_lens.view(num_seqs, 1, 1)
+                    for s in range(num_seqs):
+                        if num_active[s] < b_blocks:
+                            rel_bs_bb[s, num_active[s] :] = 0.0
+                    alibi_rel_by_block_cpu = rel_bs_bb.permute(1, 0, 2).unsqueeze(2).contiguous()
+
         return SpyreAttentionMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             num_seqs=common_attn_metadata.num_reqs,
@@ -986,6 +1030,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             query_row_ids_cpu=query_row_ids_cpu,
             block_ids_padded_cpu=block_ids_padded_cpu,
             mask_by_block_cpu=mask_by_block_cpu,
+            alibi_rel_by_block_cpu=alibi_rel_by_block_cpu,
         )
 
 
@@ -1119,6 +1164,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         self._attn_fns: dict[tuple[int, int, str, bool], object] = {}
 
         self._kv_slots: SpyrePagedKVCache | None = None
+        # Per-layer, unlike the slope-free rel tensor shared on the metadata.
+        self._alibi_slopes_dev: torch.Tensor | None = None
 
         # Keyed by (bucket_num_seqs, bucket_num_blocks, needs_gather).
         self._decode_fns: dict[tuple[int, int, bool], object] = {}
@@ -1169,6 +1216,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                     self.num_queries_per_kv,
                     block_size,
                     self.head_size,
+                    has_alibi=self.alibi_slopes is not None,
                     needs_gather=needs_gather,
                 ),
                 self._compile_attn,
@@ -1183,12 +1231,16 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         if not envs.SPYRE_BUCKETED_DECODE:
             return False
         # Layer 0's builder gates on max_query_len, sliding_window, and the
-        # bucket lattice; we add ALiBi / soft-cap which the bucketed kernel
-        # doesn't implement.
+        # bucket lattice.
         if attn_metadata.bucket_num_seqs is None:
             return False
-        if self.alibi_slopes is not None:
+        # The builder derives the ALiBi rel tensor from the model config, this impl
+        # from its own slopes. They agree for every supported ALiBi model, but fall
+        # back rather than trust it: without rel the kernel cannot apply the bias.
+        if self.alibi_slopes is not None and attn_metadata.alibi_rel_by_block_cpu is None:
             return False
+        # Soft-cap is not implemented in the bucketed kernel on this base; drop this
+        # gate to `return True` when rebasing onto the branch that adds it.
         return self.logits_soft_cap == 0.0
 
     # `kv_cache` widens the base's `torch.Tensor` to `SpyrePagedKVCache`,
@@ -1255,6 +1307,10 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             attn_metadata.mask_by_block_dev = convert(
                 attn_metadata.mask_by_block_cpu, device=_target_device
             )
+            if attn_metadata.alibi_rel_by_block_cpu is not None:
+                attn_metadata.alibi_rel_by_block_dev = convert(
+                    attn_metadata.alibi_rel_by_block_cpu, device=_target_device
+                )
 
         output = self._online_softmax_attention(
             query[:num_actual_tokens],
@@ -1340,6 +1396,9 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         # Short of b_seqs rows only when the runner's compile bucket is tighter than
         # the power-of-two seq bucket; the kernel slices a prefix otherwise.
+        if self.alibi_slopes is not None and self._alibi_slopes_dev is None:
+            self._alibi_slopes_dev = convert(self.alibi_slopes, device=k_pages.device)
+
         needs_gather = query_dev.shape[0] < b_seqs
         kernel = self._get_bucketed_decode_kernel(b_seqs, b_blocks, block_size, needs_gather)
         result = kernel(
@@ -1350,6 +1409,8 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             block_ids_flat,
             attn_metadata.mask_by_block_dev,
             self.scale,
+            attn_metadata.alibi_rel_by_block_dev,
+            self._alibi_slopes_dev,
         )
 
         # Q=1 makes query_row_ids_cpu[:num_seqs] == range(num_seqs), so the
