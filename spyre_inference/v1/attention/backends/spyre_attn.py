@@ -169,9 +169,13 @@ def _maybe_compile(fn, compile_enabled: bool):
     return fn
 
 
-def _reshape_and_cache_kernel(key, value, k_slots, v_slots, slot_mapping):
-    k_slots.index_copy_(0, slot_mapping, key)
-    v_slots.index_copy_(0, slot_mapping, value)
+def _reshape_and_cache_kernel(key, value, k_slots, v_slots, local_index, lo, hi):
+    # `aten.index_copy` is a fallback op whose write-arg dispatch clones the slice it is
+    # handed, so scattering into `[lo, hi)` costs O(hi - lo) where a full-cache
+    # index_copy_ reads and writes every slot. Rows in the span held by other sequences
+    # survive: only the indexed rows are written, and the clone/copy-back keeps the rest.
+    k_slots[lo:hi].index_copy_(0, local_index, key)
+    v_slots[lo:hi].index_copy_(0, local_index, value)
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1290,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         value: torch.Tensor,
         kv_cache: SpyrePagedKVCache,
         slot_mapping: torch.Tensor,
+        slot_bounds: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         """Scatter new K/V tokens into their cache slots.
 
@@ -1298,9 +1303,23 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         )
 
         k_slots, v_slots = self.kv_slot_views(kv_cache)
+        # Bounds come from publish(): slot_mapping is on device here and `aten::min` has
+        # no Spyre implementation, in eager or in-graph.
         # Eager index_copy_ rejects an int32 index and silently falls back to CPU with an
         # int64 one, so this always goes through the compiled artifact.
-        self._reshape_fn(key, value, k_slots, v_slots, slot_mapping)
+        if slot_bounds is None:
+            self._reshape_fn(key, value, k_slots, v_slots, slot_mapping, 0, k_slots.shape[0])
+        else:
+            lo, hi = slot_bounds
+            self._reshape_fn(
+                key,
+                value,
+                k_slots,
+                v_slots,
+                slot_mapping - lo,
+                lo,
+                min(hi, k_slots.shape[0]),
+            )
         # Only k_slots is returned, but Inductor fuses both index_copy_ calls into one
         # kernel, so ordering the read after it covers the V write too.
         return k_slots

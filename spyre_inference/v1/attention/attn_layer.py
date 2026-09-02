@@ -40,6 +40,24 @@ logger = init_logger(__name__)
 _NULL_SLOT = 0
 
 
+def _slot_bounds(slot_mapping: torch.Tensor, layers: list) -> tuple[int, int] | None:
+    """Block-snapped [lo, hi) covering the valid slots, or None if there are none.
+
+    Snapped because raw lo advances every step and `dynamic=False` would then compile a
+    fresh KV-write artifact per step. Costs at most 2 * block_size extra rows.
+    """
+    valid = slot_mapping[slot_mapping >= 0]
+    if not valid.numel() or not layers:
+        return None
+    cache = layers[0].kv_cache
+    if not len(cache):
+        return None
+    block_size = cache[0].shape[1]
+    lo = (int(valid.min()) // block_size) * block_size
+    hi = -(-(int(valid.max()) + 1) // block_size) * block_size
+    return (lo, hi)
+
+
 class SlotMapping:
     """This step's slot mapping on device, shared by every split layer."""
 
@@ -47,6 +65,8 @@ class SlotMapping:
         self._layers = layers
         self._device: torch.device | None = None
         self.slots: torch.Tensor | None = None
+        # Host-side bounds for the KV write; see _slot_bounds.
+        self.bounds: tuple[int, int] | None = None
 
     def _resolve_device(self) -> torch.device | None:
         if self._device is None:
@@ -67,6 +87,7 @@ class SlotMapping:
         if device is None:
             return
         self.slots = convert(slot_mapping.clamp(min=_NULL_SLOT), device=device)
+        self.bounds = _slot_bounds(slot_mapping, self._layers)
 
     def publish_null(self, num_tokens: int) -> None:
         device = self._resolve_device()
@@ -75,6 +96,9 @@ class SlotMapping:
         self.slots = convert(
             torch.full((num_tokens,), _NULL_SLOT, dtype=torch.int64), device=device
         )
+        # Null slots all point at block 0, so the bounds from a previous real step would
+        # rebase them negative. None makes the write take its full-cache branch.
+        self.bounds = None
 
 
 _holders: weakref.WeakSet[SlotMapping] = weakref.WeakSet()
@@ -117,7 +141,14 @@ def _spyre_attention_forward(
     if slots is not None and key is not None and value is not None:
         # `dep` makes "scatter before read" a real data dependency, which is otherwise
         # invisible because the op reaches its cache through the forward context.
-        dep = self.impl.do_kv_cache_update(self, key, value, self.kv_cache, slots)
+        dep = self.impl.do_kv_cache_update(
+            self,
+            key,
+            value,
+            self.kv_cache,
+            slots,
+            cast(SlotMapping, self.spyre_slots).bounds,
+        )
 
     torch.ops.vllm.unified_attention_with_output(
         query,  # ty: ignore[invalid-argument-type]
