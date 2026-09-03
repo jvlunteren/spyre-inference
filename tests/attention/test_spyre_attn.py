@@ -1152,6 +1152,12 @@ def test_kv_cache_shape_matches_runner_allocation():
     fake_layer.kv_cache = None
     runner.compilation_config.static_forward_context["layers.0.self_attn"] = fake_layer
 
+    # initialize_kv_cache_tensors transfers with an explicit device_layout, which
+    # needs a Spyre RuntimeContext that a layout-carrying .to() will not create.
+    if not spyre_available():
+        pytest.skip("Spyre device not available")
+    torch.zeros(8, 8, dtype=torch.float16).to("spyre")
+
     caches = runner.initialize_kv_cache_tensors(kv_cache_config, [block_size])
     k_pages = caches["layers.0.self_attn"].k_pages
     v_pages = caches["layers.0.self_attn"].v_pages
