@@ -1152,11 +1152,10 @@ def test_kv_cache_shape_matches_runner_allocation():
     fake_layer.kv_cache = None
     runner.compilation_config.static_forward_context["layers.0.self_attn"] = fake_layer
 
-    # initialize_kv_cache_tensors transfers with an explicit device_layout, which
-    # needs a Spyre RuntimeContext that a layout-carrying .to() will not create.
+    # spyre_available() allocates on the device, which creates the RuntimeContext that
+    # initialize_kv_cache_tensors' layout-carrying transfer needs but will not create.
     if not spyre_available():
         pytest.skip("Spyre device not available")
-    torch.zeros(8, 8, dtype=torch.float16).to("spyre")
 
     caches = runner.initialize_kv_cache_tensors(kv_cache_config, [block_size])
     k_pages = caches["layers.0.self_attn"].k_pages
@@ -1168,6 +1167,13 @@ def test_kv_cache_shape_matches_runner_allocation():
     # Sanity: the physical layout is token-major (block_size before num_kv_heads),
     # and each page is contiguous in the last two dims.
     assert k_pages.shape == (num_blocks, block_size, num_kv_heads, head_size)
+
+    # The paged scatter indexes dim 0, so the slot axis has to stay whole at device
+    # position 0: the default tiled layout splits it across two device dims and writes
+    # the wrong rows (torch-spyre#3705).
+    num_slots = num_blocks * block_size
+    for pages in (k_pages, v_pages):
+        assert pages.device_tensor_layout().device_size[0] == num_slots
 
 
 def test_sliding_window_none_equivalence(default_vllm_config):

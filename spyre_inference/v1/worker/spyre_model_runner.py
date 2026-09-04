@@ -1031,18 +1031,6 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 dtype=torch.float16,
             ).to(self._spyre_device, device_layout=layout)  # ty: ignore[no-matching-overload]
 
-            # The paged scatter indexes dim 0, so the slot axis has to stay whole at
-            # device position 0: the default tiled layout splits it across two device
-            # dims and writes the wrong rows (torch-spyre#3705).
-            num_slots = num_blocks * spec.block_size
-            for pages_name, pages in (("k_pages", k_pages), ("v_pages", v_pages)):
-                device_size = pages.device_tensor_layout().device_size
-                if device_size[0] != num_slots:
-                    raise RuntimeError(
-                        f"{pages_name} is not slot-major: device_size={device_size}, "
-                        f"expected {num_slots} slots at device position 0"
-                    )
-
             page_cache = SpyrePagedKVCache(k_pages=k_pages, v_pages=v_pages)
             for layer_name in kv_cache_tensor.shared_by:
                 kv_caches[layer_name] = page_cache
