@@ -28,13 +28,20 @@ from spyre_inference.v1.attention.spyre_attn_bucketer import (
 )
 
 BLOCK_SIZE = 64
+MAX_NUM_SEQS = 8
 
 
-def make_config(max_model_len=2048, max_num_batched_tokens=512, block_size=BLOCK_SIZE):
+def make_config(
+    max_model_len=2048,
+    max_num_batched_tokens=512,
+    block_size=BLOCK_SIZE,
+    max_num_seqs=MAX_NUM_SEQS,
+):
     config = MagicMock()
     config.cache_config.block_size = block_size
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    config.scheduler_config.max_num_seqs = max_num_seqs
     return config
 
 
@@ -183,6 +190,47 @@ class TestVariants:
         assert padded_query_len is not None and num_blocks is not None
         sizes = {(v.num_blocks, v.padded_query_len) for v in bucketer.variants()}
         assert (num_blocks, padded_query_len) in sizes
+
+    @pytest.mark.parametrize("num_seqs", [4, 5, 7, 8])
+    @pytest.mark.parametrize("kv_len", [64, 300, 1025, 2048])
+    def test_every_batched_size_lands_on_a_recorded_variant(self, bucketer, num_seqs, kv_len):
+        """Same guarantee for the batched kernel: no runtime batch may miss the cache.
+
+        Drives the two lookups the batched dispatch uses -- _round_up onto
+        num_seqs_buckets and onto num_blocks_buckets.
+        """
+        b_seqs = bucketer._round_up(num_seqs, bucketer.num_seqs_buckets)
+        b_blocks = bucketer._round_up(
+            (kv_len + BLOCK_SIZE - 1) // BLOCK_SIZE, bucketer.num_blocks_buckets
+        )
+        assert b_seqs is not None and b_blocks is not None
+        sizes = {(v.num_seqs, v.num_blocks) for v in bucketer.batched_variants()}
+        assert (b_seqs, b_blocks) in sizes
+
+    def test_batched_variants_cover_both_flag_states(self, bucketer):
+        """needs_gather varies per step, so both values must be recorded at every size.
+
+        store_out additionally needs a fused-store-eligible output buffer, and the
+        dispatch only takes it when needs_gather is False.
+        """
+        by_size: dict[tuple[int, int], set[tuple[bool, bool]]] = {}
+        for v in bucketer.batched_variants():
+            by_size.setdefault((v.num_seqs, v.num_blocks), set()).add((v.needs_gather, v.store_out))
+        assert by_size
+        for flags in by_size.values():
+            assert (True, False) in flags
+            assert (False, False) in flags
+            assert (False, True) in flags
+            # store_out with a gather is unreachable: the dispatch requires not needs_gather.
+            assert (True, True) not in flags
+
+    def test_batched_variants_skip_unreachable_seqs_buckets(self, bucketer):
+        """build() only takes the batched path at or above _MIN_SEQS_BUCKET."""
+        from spyre_inference.v1.attention.backends.spyre_attn import _MIN_SEQS_BUCKET
+
+        assert {v.num_seqs for v in bucketer.batched_variants()} == {
+            n for n in bucketer.num_seqs_buckets if n >= _MIN_SEQS_BUCKET
+        }
 
     def test_count_stays_tractable_at_long_context(self):
         """Dense buckets here would be tens of thousands of Inductor compiles."""
