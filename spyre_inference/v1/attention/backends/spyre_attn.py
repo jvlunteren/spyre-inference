@@ -117,6 +117,27 @@ def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
     return tuple(result)
 
 
+# A padded block is a real KV read, so bucket round-up costs decode latency: 4/3 bounds
+# it at a quarter of the bucket where powers of two cost a half.
+_TOKEN_BUCKET_STEP_NUM, _TOKEN_BUCKET_STEP_DEN = 4, 3
+_TOKEN_BUCKET_ANCHOR = 64
+
+
+def _token_buckets_up_to(max_tokens: int, anchor: int = _TOKEN_BUCKET_ANCHOR) -> tuple[int, ...]:
+    """Multiplicative token buckets in [anchor, max_tokens], each a multiple of anchor."""
+    if max_tokens < 1:
+        return ()
+    steps: list[int] = []
+    t = anchor
+    while t < max_tokens:
+        steps.append(t)
+        # max() with t + anchor: at small t the ratio rounds back to t and would stall.
+        grown = -(-t * _TOKEN_BUCKET_STEP_NUM // _TOKEN_BUCKET_STEP_DEN)
+        t = -(-max(t + anchor, grown) // anchor) * anchor
+    steps.append(max_tokens)
+    return tuple(steps)
+
+
 def _find_bucket(n: int, buckets: tuple[int, ...]) -> int | None:
     """Smallest bucket >= n, or None when n exceeds the top bucket."""
     idx = bisect.bisect_left(buckets, n)

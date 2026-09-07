@@ -133,7 +133,10 @@ class SpyreAttnBucketer:
 
         # Imported at call time, not module scope: spyre_attn imports this
         # module, so a top-level import back into it would be circular.
-        from spyre_inference.v1.attention.backends.spyre_attn import _powers_of_two_up_to
+        from spyre_inference.v1.attention.backends.spyre_attn import (
+            _powers_of_two_up_to,
+            _token_buckets_up_to,
+        )
 
         if block_size & (block_size - 1):
             # Not fatal: _powers_of_two_up_to rounds the start up to a power of
@@ -156,7 +159,7 @@ class SpyreAttnBucketer:
             envs.SPYRE_ATTN_KV_BUCKETS,
             max_model_len,
             "SPYRE_ATTN_KV_BUCKETS",
-            lambda: list(_powers_of_two_up_to(max_model_len, start=block_size)),
+            lambda: list(_token_buckets_up_to(max_model_len)),
         )
 
         # Default: [1] (the decode-only batch, exempt from query padding by
