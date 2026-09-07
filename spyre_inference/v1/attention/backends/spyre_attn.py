@@ -44,6 +44,7 @@ from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucket,
     SpyreAttnBucketer,
+    SpyreBatchedAttnBucket,
 )
 
 logger = init_logger(__name__)
@@ -625,18 +626,16 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
 
         # Buckets for the batched decode fast path. One compiled kernel
         # per bucket. TODO: expose as engine args if configurability is needed.
-        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        max_num_blocks_per_seq = (
-            model_config.max_model_len + self.block_size - 1
-        ) // self.block_size
-        self._num_seqs_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_seqs)
-        self._num_blocks_buckets: tuple[int, ...] = _powers_of_two_up_to(max_num_blocks_per_seq)
-
         # Owned here, not by the recorder, so a bucket build() can emit is
         # always a bucket that was compiled: the warmup recorder reads this
         # same instance back (spyre_model_runner._record_attention_graphs)
         # rather than constructing a second one that could drift.
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
+
+        # Both ladders come from the bucketer, so the set build() dispatches onto and
+        # the set warmup records are the same by construction.
+        self._num_seqs_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_seqs_buckets)
+        self._num_blocks_buckets: tuple[int, ...] = tuple(self._attn_bucketer.num_blocks_buckets)
 
     def _get_zero_tile(self, aligned_max_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
@@ -1447,25 +1446,33 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         k_pages, v_pages = kv_cache
         num_pages, block_size = k_pages.shape[0], k_pages.shape[1]
         variants = bucketer.variants()
+        # The batched kernel keys on (num_seqs, num_blocks) rather than the per-sequence
+        # tuple, so it needs its own enumeration.
+        batched = bucketer.batched_variants() if envs.SPYRE_BATCHED_DECODE else []
+        total_variants = len(variants) + len(batched)
         t_start = time.time()
 
         # Belt-and-suspenders: platform._raise_dynamo_recompile_limits already
         # raises this globally, but bump it here too in case that hasn't run.
         prev_limit = torch._dynamo.config.accumulated_recompile_limit
         torch._dynamo.config.accumulated_recompile_limit = max(  # ty: ignore[invalid-assignment]
-            prev_limit, 4 * len(variants) + 64
+            prev_limit, 4 * total_variants + 64
         )
 
-        logger.info("Recording %d attention variants for layer...", len(variants))
+        logger.info("Recording %d attention variants for layer...", total_variants)
         try:
             recorded = self._record_all(variants, k_pages, v_pages, num_pages, block_size, device)
+            if batched:
+                recorded += self._record_batched_all(
+                    batched, k_pages, v_pages, num_pages, block_size, device
+                )
         finally:
             torch._dynamo.config.accumulated_recompile_limit = prev_limit  # ty: ignore[invalid-assignment]
 
         logger.info(
             "Recorded %d/%d attention variants in %.2fs.",
             recorded,
-            len(variants),
+            total_variants,
             time.time() - t_start,
         )
         return recorded
@@ -1508,6 +1515,78 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
                 time.time() - t0,
             )
         return recorded
+
+    def _record_batched_all(
+        self,
+        variants: "list[SpyreBatchedAttnBucket]",
+        k_pages: torch.Tensor,
+        v_pages: torch.Tensor,
+        num_pages: int,
+        block_size: int,
+        device: torch.device,
+    ) -> int:
+        """Compile every batched decode variant, mirroring _record_all's contract."""
+        recorded = 0
+        for bucket in variants:
+            if bucket.num_blocks > num_pages:
+                # The buckets are sized from max_model_len; a small KV allocation
+                # cannot host that many distinct pages to gather.
+                continue
+            if bucket.key in self._decode_fns:
+                continue
+            try:
+                self._record_batched_one(bucket, k_pages, v_pages, block_size, device)
+            except Exception:
+                self._decode_fns.pop(bucket.key, None)
+                logger.warning(
+                    "Batched decode variant %s failed to record; it will compile on "
+                    "first use instead.",
+                    bucket.key,
+                    exc_info=True,
+                )
+                continue
+            recorded += 1
+        return recorded
+
+    def _record_batched_one(
+        self,
+        bucket: "SpyreBatchedAttnBucket",
+        k_pages: torch.Tensor,
+        v_pages: torch.Tensor,
+        block_size: int,
+        device: torch.device,
+    ) -> None:
+        """Trace one batched variant on dummy args matching the kernel's contract."""
+        b_seqs, b_blocks = bucket.num_seqs, bucket.num_blocks
+        kernel = self._get_batched_decode_kernel(
+            b_seqs, b_blocks, block_size, bucket.needs_gather, bucket.store_out
+        )
+
+        # The very buffers attn_layer hands over, not fresh tensors of the same shape:
+        # Dynamo guards on the argument's shape, and since #789 that shape is the
+        # staging width, not b_seqs. Recording on anything else compiles a graph the
+        # serving path cannot reuse.
+        q_staging, out_staging = self._staging_buffers(device)
+        query = q_staging
+        row_ids = None
+        if bucket.needs_gather:
+            row_ids = convert(torch.zeros(b_seqs, dtype=torch.int64), device=device)
+
+        block_ids = convert(
+            torch.zeros(b_blocks, _stick_aligned_len(b_seqs), dtype=torch.int32),
+            device=device,
+        )
+        # All-zero additive mask: zero is the one choice that cannot leave a row fully
+        # masked, which would make tile_sum 0 and the result NaN.
+        mask_by_block = convert(
+            torch.zeros(
+                b_blocks, b_seqs * self.num_kv_heads, 1, block_size, dtype=self.model_dtype
+            ),
+            device=device,
+        )
+        out = out_staging if bucket.store_out else None
+
+        kernel(query, row_ids, k_pages, v_pages, block_ids, mask_by_block, self.scale, out)
 
     def _record_one(
         self,
@@ -1639,9 +1718,11 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # (torch-spyre#3770), so each block needed a .clone().
         block_ids = attn_metadata.block_ids_padded_dev
 
-        # Short of b_seqs rows only when the runner's compile bucket is tighter than
-        # the power-of-two seq bucket; the kernel slices a prefix otherwise.
-        needs_gather = query_dev.shape[0] < b_seqs
+        # Padding rows are present exactly when the real batch is short of the
+        # bucket; the kernel slices a prefix otherwise. Derived from the seq counts,
+        # not the query width: since #789 the width is a constant staging buffer
+        # (max_num_batched_tokens + 1) and carries no information about the batch.
+        needs_gather = num_seqs < b_seqs
         # The kernel writes b_seqs rows, so output must have them. Re-checked per call:
         # vLLM hands out a fresh buffer per layer.
         store_out = (

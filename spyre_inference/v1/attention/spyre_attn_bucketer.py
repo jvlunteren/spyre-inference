@@ -103,6 +103,24 @@ def _resolve_buckets(
     return buckets
 
 
+@dataclass(frozen=True)
+class SpyreBatchedAttnBucket:
+    """One recordable batched decode kernel variant.
+
+    Fields mirror ``SpyreAttentionImpl._get_batched_decode_kernel``'s cache key exactly,
+    so a recorded bucket and a runtime dispatch are the same tuple.
+    """
+
+    num_seqs: int
+    num_blocks: int
+    needs_gather: bool
+    store_out: bool
+
+    @property
+    def key(self) -> tuple[int, int, bool, bool]:
+        return (self.num_seqs, self.num_blocks, self.needs_gather, self.store_out)
+
+
 class SpyreAttnBucketer:
     """Enumerates the attention variants to record, and rounds lengths onto them.
 
@@ -161,6 +179,11 @@ class SpyreAttnBucketer:
         # num_blocks is what the kernel specializes on. Derived from the kv
         # buckets, one block count per kv bucket, rather than enumerating every
         # integer up to max_model_len / block_size.
+        # The batched decode kernel adds a sequence axis, so it needs a second ladder.
+        # Owned here so one place defines every bucket either kernel can dispatch onto.
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self._num_seqs_buckets: list[int] = list(_powers_of_two_up_to(max_num_seqs))
+
         self._num_blocks_buckets: list[int] = sorted(
             {(kv + block_size - 1) // block_size for kv in self._kv_buckets}
         )
@@ -188,6 +211,44 @@ class SpyreAttnBucketer:
     @property
     def num_blocks_buckets(self) -> list[int]:
         return self._num_blocks_buckets
+
+    @property
+    def num_seqs_buckets(self) -> list[int]:
+        return self._num_seqs_buckets
+
+    def batched_variants(self) -> list[SpyreBatchedAttnBucket]:
+        """Every batched decode variant worth recording, largest first.
+
+        The kernel specialises on (num_seqs, num_blocks) and on two flags.
+        ``needs_gather`` is True when the query buffer holds fewer rows than the seqs
+        bucket. At the smallest bucket that cannot happen -- ``build()`` only enters at
+        ``_MIN_BATCHED_SEQS`` and that rounds to itself -- so it is enumerated only above.
+        ``store_out`` additionally needs a fused-store-eligible output buffer, and the
+        dispatch only takes it when ``needs_gather`` is False.
+        """
+        out: list[SpyreBatchedAttnBucket] = []
+        # build() only takes this path at or above _MIN_BATCHED_SEQS, so smaller seqs
+        # buckets are unreachable and recording them would compile dead variants.
+        from spyre_inference.v1.attention.backends.spyre_attn import _MIN_BATCHED_SEQS
+
+        reachable = [n for n in self._num_seqs_buckets if n >= _MIN_BATCHED_SEQS]
+        for num_seqs in sorted(reachable, reverse=True):
+            for num_blocks in sorted(self._num_blocks_buckets, reverse=True):
+                # At the smallest bucket num_seqs == b_seqs always, so no gather.
+                gathers = (False,) if num_seqs == _MIN_BATCHED_SEQS else (False, True)
+                for needs_gather in gathers:
+                    # store_out is only reachable without a gather (dispatch requires it).
+                    store_outs = (False,) if needs_gather else (True, False)
+                    for store_out in store_outs:
+                        out.append(
+                            SpyreBatchedAttnBucket(
+                                num_seqs=num_seqs,
+                                num_blocks=num_blocks,
+                                needs_gather=needs_gather,
+                                store_out=store_out,
+                            )
+                        )
+        return out
 
     def find_kv_bucket(self, kv_len: int) -> int | None:
         return self._round_up(kv_len, self._kv_buckets)

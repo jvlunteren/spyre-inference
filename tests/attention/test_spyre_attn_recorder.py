@@ -66,11 +66,14 @@ def kv_cache():
     )
 
 
-def make_bucketer(max_model_len=256, max_num_batched_tokens=64):
+def make_bucketer(max_model_len=256, max_num_batched_tokens=64, max_num_seqs=8):
     config = MagicMock()
     config.cache_config.block_size = BLOCK_SIZE
     config.model_config.max_model_len = max_model_len
     config.scheduler_config.max_num_batched_tokens = max_num_batched_tokens
+    # MagicMock returns a Mock for anything unset, which the bucket arithmetic
+    # then compares against an int; every field it reads has to be real.
+    config.scheduler_config.max_num_seqs = max_num_seqs
     return SpyreAttnBucketer(config)
 
 
