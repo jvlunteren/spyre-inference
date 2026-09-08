@@ -1277,6 +1277,16 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
             dynamic=False,
         )
 
+        if envs.SPYRE_LX_KV_LAYOUT:
+            # _page_attn_kernel's permute needs the 4-D slot-major page; the folded
+            # cache is 3-D. Prefill and sub-_MIN_BATCHED_SEQS decode both reach it.
+            raise NotImplementedError(
+                "SPYRE_LX_KV_LAYOUT=1 needs a folded-aware per-sequence attention "
+                "kernel, which this build does not have: _page_attn_kernel assumes a "
+                "4-D slot-major page. Prefill, chunked prefill and any decode below "
+                "the batched path's minimum all reach it. Unset SPYRE_LX_KV_LAYOUT."
+            )
+
         self._attn_fn = _page_attn_compiled if self._compile_attn else _page_attn_kernel
         self._decode_fn = _batched_decode_compiled if self._compile_attn else _batched_decode_kernel
 
