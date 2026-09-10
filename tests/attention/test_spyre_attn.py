@@ -1965,54 +1965,37 @@ def test_spyre_attn_batched_decode_sliding_window(
 
 
 @pytest.mark.parametrize(
-    ("blocks_per_seq", "active_block_indices"),
+    ("kv_lens", "sliding_window"),
     [
-        pytest.param([24] * 8, None, id="no_window_uniform"),
-        pytest.param([24, 1, 13, 24, 2, 16, 4, 24], None, id="no_window_ragged"),
-        pytest.param([40, 40, 40, 40], None, id="no_window_truncated"),
-        pytest.param([24, 0, 12, 24], None, id="no_window_zero_row"),
-        pytest.param(
-            [4, 3, 4, 2],
-            [[0, 5, 9, 14], [2, 7, 11], [1, 3, 8, 20], [6, 13]],
-            id="window_sparse",
-        ),
+        pytest.param([256, 512, 128, 384, 256, 512, 128, 384], None, id="no_window_ragged"),
+        pytest.param([64, 512, 512, 512], None, id="no_window_short_first"),
+        pytest.param([1, 128, 128, 128], None, id="no_window_zero_full_blocks"),
+        pytest.param([512, 512, 512, 512], 256, id="window_uniform"),
     ],
 )
 def test_bucketed_block_ids_match_scalar_fill(
-    blocks_per_seq: list[int], active_block_indices: list[list[int]] | None
+    default_vllm_config, kv_lens: list[int], sliding_window: int | None
 ) -> None:
-    torch.set_default_device("cpu")
-    b_blocks, b_seqs = 24, 32
-    num_seqs = len(blocks_per_seq)
-    width = (
-        max(blocks_per_seq)
-        if active_block_indices is None
-        else max(max(x) for x in active_block_indices)
-    ) + 5
-    block_table = torch.randint(1, 500, (num_seqs, width), dtype=torch.int32)
+    block_size = 64
+    seq_lens = [(1, kv) for kv in kv_lens]
+    metadata = _padded_mask_metadata(seq_lens, block_size=block_size, sliding_window=sliding_window)
+    assert metadata.block_ids_padded_cpu is not None
 
-    expected = torch.zeros(b_blocks, _stick_aligned_len(b_seqs), dtype=torch.int32)
-    for s, n in enumerate(blocks_per_seq):
-        n_use = min(n, b_blocks)
-        blocks_s = range(n_use) if active_block_indices is None else active_block_indices[s][:n_use]
-        for b, abs_b in enumerate(blocks_s):
-            expected[b, s] = block_table[s, abs_b]
-
-    bt = block_table.to(torch.int32)
-    got = torch.zeros(b_blocks, _stick_aligned_len(b_seqs), dtype=torch.int32)
-    if active_block_indices is None:
-        n_use = torch.tensor([min(n, b_blocks) for n in blocks_per_seq], dtype=torch.int64)
-        cols = torch.arange(b_blocks)
-        in_range = cols.unsqueeze(0) < n_use.unsqueeze(1)
-        pages = bt.gather(1, cols.clamp(max=bt.shape[1] - 1).unsqueeze(0).expand(num_seqs, -1))
-        got[:, :num_seqs] = (pages * in_range).t()
-    else:
-        for s, abs_blocks in enumerate(active_block_indices):
-            n_use = min(len(abs_blocks), b_blocks)
-            for b, abs_b in enumerate(abs_blocks[:n_use]):
-                got[b, s] = bt[s, abs_b]
-
-    assert torch.equal(got, expected)
+    got = metadata.block_ids_padded_cpu
+    bt = metadata.block_table
+    active = metadata.active_block_indices
+    b_blocks = got.shape[0]
+    for s, kv in enumerate(kv_lens):
+        abs_blocks = (
+            active[s] if active is not None else list(range((kv + block_size - 1) // block_size))
+        )
+        n_use = min(len(abs_blocks), b_blocks)
+        for b in range(n_use):
+            assert got[b, s].item() == bt[s, abs_blocks[b]].item(), (
+                f"seq={s} block={b}: got {got[b, s].item()}, expected {bt[s, abs_blocks[b]].item()}"
+            )
+        for b in range(n_use, b_blocks):
+            assert got[b, s].item() == 0, f"seq={s} block={b} (past end): got {got[b, s].item()}"
 
 
 def _padded_mask_metadata(

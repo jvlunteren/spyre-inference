@@ -1081,15 +1081,13 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 )
                 bt = block_table[:num_seqs].to(torch.int32)
                 if active_block_indices is None:
-                    n_use = torch.tensor(
-                        [min(n, b_blocks) for n in blocks_per_seq], dtype=torch.int64
-                    )
-                    cols = torch.arange(b_blocks)
-                    in_range = cols.unsqueeze(0) < n_use.unsqueeze(1)
-                    pages = bt.gather(
-                        1, cols.clamp(max=bt.shape[1] - 1).unsqueeze(0).expand(num_seqs, -1)
-                    )
-                    block_ids_padded_cpu[:, :num_seqs] = (pages * in_range).t()
+                    n_use_list = [min(n, b_blocks) for n in blocks_per_seq]
+                    w = min(b_blocks, bt.shape[1])
+                    cols = torch.arange(w)
+                    in_range = cols.unsqueeze(0) < torch.tensor(
+                        n_use_list, dtype=torch.int64
+                    ).unsqueeze(1)
+                    block_ids_padded_cpu[:w, :num_seqs] = (bt[:, :w] * in_range).t()
                 else:
                     for s, abs_blocks in enumerate(active_block_indices):
                         n_use = min(len(abs_blocks), b_blocks)
