@@ -1964,6 +1964,57 @@ def test_spyre_attn_batched_decode_sliding_window(
     )
 
 
+@pytest.mark.parametrize(
+    ("blocks_per_seq", "active_block_indices"),
+    [
+        pytest.param([24] * 8, None, id="no_window_uniform"),
+        pytest.param([24, 1, 13, 24, 2, 16, 4, 24], None, id="no_window_ragged"),
+        pytest.param([40, 40, 40, 40], None, id="no_window_truncated"),
+        pytest.param([24, 0, 12, 24], None, id="no_window_zero_row"),
+        pytest.param(
+            [4, 3, 4, 2],
+            [[0, 5, 9, 14], [2, 7, 11], [1, 3, 8, 20], [6, 13]],
+            id="window_sparse",
+        ),
+    ],
+)
+def test_bucketed_block_ids_match_scalar_fill(
+    blocks_per_seq: list[int], active_block_indices: list[list[int]] | None
+) -> None:
+    torch.set_default_device("cpu")
+    b_blocks, b_seqs = 24, 32
+    num_seqs = len(blocks_per_seq)
+    width = (
+        max(blocks_per_seq)
+        if active_block_indices is None
+        else max(max(x) for x in active_block_indices)
+    ) + 5
+    block_table = torch.randint(1, 500, (num_seqs, width), dtype=torch.int32)
+
+    expected = torch.zeros(b_blocks, _stick_aligned_len(b_seqs), dtype=torch.int32)
+    for s, n in enumerate(blocks_per_seq):
+        n_use = min(n, b_blocks)
+        blocks_s = range(n_use) if active_block_indices is None else active_block_indices[s][:n_use]
+        for b, abs_b in enumerate(blocks_s):
+            expected[b, s] = block_table[s, abs_b]
+
+    bt = block_table.to(torch.int32)
+    got = torch.zeros(b_blocks, _stick_aligned_len(b_seqs), dtype=torch.int32)
+    if active_block_indices is None:
+        n_use = torch.tensor([min(n, b_blocks) for n in blocks_per_seq], dtype=torch.int64)
+        cols = torch.arange(b_blocks)
+        in_range = cols.unsqueeze(0) < n_use.unsqueeze(1)
+        pages = bt.gather(1, cols.clamp(max=bt.shape[1] - 1).unsqueeze(0).expand(num_seqs, -1))
+        got[:, :num_seqs] = (pages * in_range).t()
+    else:
+        for s, abs_blocks in enumerate(active_block_indices):
+            n_use = min(len(abs_blocks), b_blocks)
+            for b, abs_b in enumerate(abs_blocks[:n_use]):
+                got[b, s] = bt[s, abs_b]
+
+    assert torch.equal(got, expected)
+
+
 def _padded_mask_metadata(
     seq_lens: list[tuple[int, int]],
     block_size: int = 64,
