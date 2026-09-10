@@ -1899,7 +1899,7 @@ def test_batched_decode_soft_cap_changes_the_kernel() -> None:
         ),
         pytest.param(
             [(1, 256), (32, 256), (1, 256), (32, 256)],
-            id="mixed_decode_prefill(fallback)",
+            id="mixed_decode_prefill_non_leading(fallback)",
         ),
     ],
 )
@@ -1996,6 +1996,56 @@ def test_bucketed_block_ids_match_scalar_fill(
             )
         for b in range(n_use, b_blocks):
             assert got[b, s].item() == 0, f"seq={s} block={b} (past end): got {got[b, s].item()}"
+
+
+@pytest.mark.parametrize(
+    "configure_device",
+    [pytest.param("spyre", id="device_spyre")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "configure_compilation",
+    [pytest.param("STOCK_TORCH_COMPILE", id="compilation_STOCK")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        pytest.param(
+            [(1, 256), (1, 512), (1, 128), (1, 384), (32, 256)],
+            id="decode_prefix(N=4)+prefill",
+        ),
+        pytest.param(
+            [
+                (1, 256),
+                (1, 512),
+                (1, 128),
+                (1, 384),
+                (1, 256),
+                (1, 512),
+                (1, 128),
+                (1, 384),
+                (64, 256),
+                (32, 512),
+            ],
+            id="decode_prefix(N=8)+2prefills",
+        ),
+    ],
+)
+def test_spyre_attn_mixed_batch_batched_decode(
+    default_vllm_config,
+    enable_batched_decode,
+    seq_lens: list[tuple[int, int]],
+    configure_compilation: str,
+    configure_device: str,
+) -> None:
+    _run_spyre_attn_test(
+        seq_lens=seq_lens,
+        block_size=128,
+        sliding_window=None,
+        configure_compilation=configure_compilation,
+        configure_device=configure_device,
+    )
 
 
 def _padded_mask_metadata(
