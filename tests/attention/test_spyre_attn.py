@@ -160,7 +160,8 @@ def _build_metadata(
         device=torch.device("cpu"),
     )
 
-    max_query_len = int((query_start_loc[1:] - query_start_loc[:-1]).max().item())
+    query_lens_per_seq = query_start_loc[1:] - query_start_loc[:-1]
+    max_query_len = int(query_lens_per_seq.max().item())
     max_seq_len = int(seq_lens.max().item())
     num_actual_tokens = int(query_start_loc[-1].item())
 
@@ -175,6 +176,7 @@ def _build_metadata(
         block_table_tensor=block_table,
         slot_mapping=slot_mapping,
         causal=True,
+        is_prefilling=(query_lens_per_seq > 1),
     )
 
     return builder.build(
@@ -2029,6 +2031,22 @@ def test_bucketed_block_ids_match_scalar_fill(
                 (32, 512),
             ],
             id="decode_prefix(N=8)+2prefills",
+        ),
+        pytest.param(
+            [(1, 256), (1, 512), (1, 128), (1, 384), (1, 256), (32, 256)],
+            id="decode_prefix(N=5_padded_to_8)+prefill",
+        ),
+        pytest.param(
+            [(1, 256), (1, 512), (1, 128), (1, 384), (1, 256), (2, 256)],
+            id="decode_prefix(N=5)+tiny_prefill",
+        ),
+        pytest.param(
+            [(1, 128), (1, 256), (1, 384), (64, 256)],
+            id="decode_prefix(N=3_below_min)+prefill",
+        ),
+        pytest.param(
+            [(1, 256), (32, 256), (1, 512), (1, 128), (1, 384)],
+            id="decode_prefill_interleaved(fallback)",
         ),
     ],
 )

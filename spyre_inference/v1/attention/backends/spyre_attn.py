@@ -37,6 +37,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from spyre_inference import envs
@@ -566,6 +567,7 @@ class SpyreAttentionMetadata(AttentionMetadata):
     # Spyre's index_copy_ requires int64. mask_by_block is pre-permuted for cheap
     # axis-0 slicing in the dispatch.
     num_decode_seqs: int = 0  # leading decode-only seqs; == num_seqs for pure-decode batches
+    num_decode_tokens: int = 0  # == num_decode_seqs since each decode contributes one token
     padded_num_seqs: int | None = None
     padded_batch_blocks: int | None = None
     query_row_ids_cpu: torch.Tensor | None = None  # [B_seqs] int64
@@ -673,7 +675,9 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # rather than constructing a second one that could drift.
         self._attn_bucketer = SpyreAttnBucketer(vllm_config)
 
-        self._init_reorder_batch_threshold(reorder_batch_threshold=1)
+        self._init_reorder_batch_threshold(
+            reorder_batch_threshold=1 if envs.SPYRE_BATCHED_DECODE else None
+        )
 
     def _get_zero_tile(self, aligned_query_len: int) -> torch.Tensor:
         """Return (or create) the shared all-zero mask tile for interior blocks.
@@ -1049,12 +1053,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # False, so the traced write keeps one shape per bucket, not one per token count.
         self._slot_mapping.publish(slot_mapping)
 
-        num_decode_seqs = 0
-        for _ql in query_lens.tolist():
-            if _ql == 1:
-                num_decode_seqs += 1
-            else:
-                break
+        num_decode_seqs, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.reorder_batch_threshold or 1,
+            treat_short_extends_as_decodes=False,
+        )
         padded_num_seqs = None
         padded_batch_blocks = None
         query_row_ids_cpu = None
@@ -1146,6 +1149,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
             aligned_query_lens=aligned_query_lens,
             padded_num_blocks=padded_num_blocks,
             num_decode_seqs=num_decode_seqs,
+            num_decode_tokens=num_decode_tokens,
             padded_num_seqs=padded_num_seqs,
             padded_batch_blocks=padded_batch_blocks,
             query_row_ids_cpu=query_row_ids_cpu,
@@ -1852,7 +1856,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         if store_out and not pre_staged:
             if batched_done:
                 # Decode rows are already in output; copy only the prefill suffix.
-                prefill_token_start = int(query_start_loc[num_decode_seqs].item())
+                prefill_token_start = attn_metadata.num_decode_tokens
                 output[prefill_token_start:batch_rows].copy_(
                     out_staging[prefill_token_start:batch_rows]
                 )
