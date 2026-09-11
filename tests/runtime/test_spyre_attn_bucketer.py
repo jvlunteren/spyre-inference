@@ -26,9 +26,9 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     _token_buckets_up_to,
 )
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    _KV_DENSE_LADDER_CAP,
     MIN_BATCHED_SEQS,
     SpyreAttnBucketer,
-    _KV_DENSE_LADDER_CAP,
     _parse_buckets,
 )
 
