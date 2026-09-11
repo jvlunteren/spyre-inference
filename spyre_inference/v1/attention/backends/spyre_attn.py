@@ -44,6 +44,7 @@ from spyre_inference import envs
 from spyre_inference.custom_ops.utils import convert
 from spyre_inference.v1.attention import attn_layer
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    MIN_BATCHED_SEQS,
     SpyreAttnBucket,
     SpyreAttnBucketer,
     SpyreBatchedAttnBucket,
@@ -91,11 +92,6 @@ def _record_block(name: str):
 # padded to this width so each row starts on a stick boundary; see
 # SpyreAttentionMetadata.page_index_tables.
 INT32_ELEMS_PER_STICK = 32
-
-
-# Batches below this fall back to the per-seq loop: the batched matmul's
-# padded-row overhead exceeds the per-seq cost at small N.
-_MIN_SEQS_BUCKET = 4
 
 
 def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
@@ -1083,7 +1079,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         query_row_ids_cpu = None
         block_ids_padded_cpu = None
         mask_by_block_cpu = None
-        if num_decode_seqs >= _MIN_SEQS_BUCKET:
+        if num_decode_seqs >= MIN_BATCHED_SEQS:
             # Real counts for the decode prefix only — same reasoning as before.
             blocks_per_seq = real_num_blocks if active_block_indices is None else num_active
             decode_blocks = blocks_per_seq[:num_decode_seqs]
@@ -1355,7 +1351,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
     def _batched_decode_preconditions_met(self, attn_metadata: "SpyreAttentionMetadata") -> bool:
         # Off by default: the batched matmul pads every sequence row up to the
         # bucket width, and that overhead is uncharacterised at the smallest
-        # bucket (num_seqs == _MIN_SEQS_BUCKET), where there is no headroom.
+        # bucket (num_seqs == MIN_BATCHED_SEQS), where there is no headroom.
         # Set SPYRE_BATCHED_DECODE=1 to restore the path.
         if not envs.SPYRE_BATCHED_DECODE:
             return False

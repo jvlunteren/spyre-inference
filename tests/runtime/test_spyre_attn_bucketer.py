@@ -26,7 +26,9 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     _token_buckets_up_to,
 )
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
+    MIN_BATCHED_SEQS,
     SpyreAttnBucketer,
+    _KV_DENSE_LADDER_CAP,
     _parse_buckets,
 )
 
@@ -53,9 +55,16 @@ def _list_pow2(limit: int, start: int = 1) -> list[int]:
     return list(_powers_of_two_up_to(limit, start=start))
 
 
-def _list_default_kv(limit: int) -> list[int]:
-    """The buckets the kv axis defaults to."""
-    return list(_token_buckets_up_to(limit))
+def _list_default_kv(limit: int, anchor: int = BLOCK_SIZE) -> list[int]:
+    """The buckets the kv axis defaults to: 4/3-spaced up to _KV_DENSE_LADDER_CAP,
+    powers-of-two above."""
+    cap = min(limit, _KV_DENSE_LADDER_CAP)
+    dense = list(_token_buckets_up_to(cap, anchor=anchor))
+    if cap < limit:
+        coarse = list(_powers_of_two_up_to(limit, start=cap))
+        dense_set = set(dense)
+        dense = dense + [b for b in coarse if b not in dense_set]
+    return dense
 
 
 @pytest.fixture()
@@ -234,21 +243,23 @@ class TestVariants:
         by_size: dict[tuple[int, int], set[tuple[bool, bool]]] = {}
         for v in bucketer.batched_variants():
             by_size.setdefault((v.num_seqs, v.num_blocks), set()).add((v.needs_gather, v.store_out))
+        from spyre_inference.v1.attention.spyre_attn_bucketer import MIN_BATCHED_SEQS
+
         assert by_size
-        for flags in by_size.values():
-            assert (True, False) in flags
+        for (num_seqs, _), flags in by_size.items():
             assert (False, False) in flags
             assert (False, True) in flags
+            # A gather needs a query buffer narrower than the bucket, which cannot happen
+            # at the smallest one: build() only enters there and it rounds to itself.
+            assert ((True, False) in flags) == (num_seqs > MIN_BATCHED_SEQS)
             # store_out with a gather is unreachable: the dispatch requires not needs_gather.
             assert (True, True) not in flags
 
-    def test_batched_variants_skip_unreachable_seqs_buckets(self, bucketer):
-        """build() only takes the batched path at or above _MIN_SEQS_BUCKET."""
-        from spyre_inference.v1.attention.backends.spyre_attn import _MIN_SEQS_BUCKET
-
-        assert {v.num_seqs for v in bucketer.batched_variants()} == {
-            n for n in bucketer.num_seqs_buckets if n >= _MIN_SEQS_BUCKET
-        }
+    def test_num_seqs_buckets_are_all_reachable(self):
+        """num_seqs_buckets is pre-filtered: every entry is a valid batched-kernel input."""
+        b = SpyreAttnBucketer(make_config(max_num_seqs=16))
+        assert all(n >= MIN_BATCHED_SEQS for n in b.num_seqs_buckets)
+        assert {v.num_seqs for v in b.batched_variants()} == set(b.num_seqs_buckets)
 
     def test_count_stays_tractable_at_long_context(self):
         """Dense buckets here would be tens of thousands of Inductor compiles."""
