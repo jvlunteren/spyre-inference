@@ -1053,10 +1053,13 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # False, so the traced write keeps one shape per bucket, not one per token count.
         self._slot_mapping.publish(slot_mapping)
 
+        # Short extends stay decodes (the default): a Q=1 row attends over its KV
+        # prefix identically whether or not the request is still prefilling, and the
+        # strict split asserts on is_prefilling, which only the model runner sets --
+        # it is None for hand-built metadata such as upstream's backend tests.
         num_decode_seqs, _, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
-            treat_short_extends_as_decodes=False,
         )
         padded_num_seqs = None
         padded_batch_blocks = None
