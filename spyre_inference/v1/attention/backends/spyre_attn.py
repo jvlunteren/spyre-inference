@@ -1053,7 +1053,6 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         # False, so the traced write keeps one shape per bucket, not one per token count.
         self._slot_mapping.publish(slot_mapping)
 
-        # A strict short-extend split asserts on is_prefilling, which only the model runner sets.
         num_decode_seqs, _, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
