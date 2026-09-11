@@ -1056,6 +1056,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         num_decode_seqs, _, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
+            treat_short_extends_as_decodes=common_attn_metadata.is_prefilling is None,
         )
         padded_num_seqs = None
         padded_batch_blocks = None
