@@ -46,9 +46,6 @@ logger = init_logger(__name__)
 MIN_BATCHED_SEQS = 4
 
 # 4/3-spaced KV buckets up to this token count; powers-of-two above.
-# Below the cap, round-up padding is a large fraction of real KV work; above it,
-# each extra padded block is a small fraction and the denser ladder's extra
-# compile units aren't worth it.
 _KV_DENSE_LADDER_CAP = 4096
 
 # Spacing of the default query buckets above the decode bucket, capped against
@@ -148,9 +145,6 @@ class SpyreAttnBucketer:
             _token_buckets_up_to,
         )
 
-        # 4/3 steps up to the cap, powers-of-two above. Dense at short KV (round-up
-        # is a large fraction of real work there); coarser at long KV to keep the
-        # variant count down.
         def _default_kv() -> list[int]:
             cap = min(max_model_len, _KV_DENSE_LADDER_CAP)
             dense = list(_token_buckets_up_to(cap, anchor=block_size))
@@ -181,8 +175,6 @@ class SpyreAttnBucketer:
             lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
         )
 
-        # Only buckets >= MIN_BATCHED_SEQS are valid batched-kernel inputs; smaller
-        # values fall back to the per-seq loop and no variant needs recording for them.
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self._num_seqs_buckets: list[int] = [
             n for n in _powers_of_two_up_to(max_num_seqs) if n >= MIN_BATCHED_SEQS
