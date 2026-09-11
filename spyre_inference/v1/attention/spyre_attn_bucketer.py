@@ -141,19 +141,19 @@ class SpyreAttnBucketer:
         # Imported at call time, not module scope: spyre_attn imports this
         # module, so a top-level import back into it would be circular.
         from spyre_inference.v1.attention.backends.spyre_attn import (
+            _TOKEN_BUCKET_ANCHOR,
             _powers_of_two_up_to,
             _token_buckets_up_to,
         )
 
         def _default_kv() -> list[int]:
             cap = min(max_model_len, _KV_DENSE_LADDER_CAP)
-            dense = list(_token_buckets_up_to(cap, anchor=block_size))
+            dense = list(_token_buckets_up_to(cap, anchor=_TOKEN_BUCKET_ANCHOR))
             if cap < max_model_len:
                 coarse = list(_powers_of_two_up_to(max_model_len, start=cap))
                 dense_set = set(dense)
                 dense = dense + [b for b in coarse if b not in dense_set]
             return dense
-
 
         self._kv_buckets: list[int] = _resolve_buckets(
             envs.SPYRE_ATTN_KV_BUCKETS,
