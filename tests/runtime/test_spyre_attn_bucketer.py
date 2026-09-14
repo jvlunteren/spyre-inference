@@ -74,19 +74,15 @@ def _clear_env_cache(monkeypatch):
 
 class TestBuckets:
     def test_kv_buckets_step_by_four_thirds_to_max_model_len(self, bucketer):
-        assert bucketer.kv_buckets == [64, 128, 192, 256, 384, 512, 704, 960, 1280, 1728, 2048]
+        assert bucketer.kv_buckets == [64, 128, 192, 256, 384, 512, 704, 960, 1024, 2048]
         assert bucketer.kv_buckets[-1] == 2048
 
     def test_kv_buckets_step_by_the_ratio_rounded_to_the_anchor(self, bucketer):
-        """The point of the ladder: round-up costs a quarter of a bucket, not a half.
-
-        Each step is 4/3 rounded up to the next anchor multiple (at least one anchor
-        on), so a gap can exceed 4/3 by up to one anchor -- worst case 1.5 at 256,
-        against the flat 2.0 a doubling ladder costs.
-        """
+        """Each step is 4/3 rounded up to an anchor multiple, so at worst 1.5x vs 2.0x."""
         anchor = _TOKEN_BUCKET_ANCHOR
-        # The top bucket is max_model_len itself, not a ladder step, so it is excluded.
-        rungs = bucketer.kv_buckets[:-1]
+        # Only the dense rungs follow the ratio: the cap and everything above it are
+        # powers of two, and the top bucket is max_model_len itself.
+        rungs = [kv for kv in bucketer.kv_buckets[:-1] if kv < _KV_DENSE_LADDER_CAP]
         for lo, hi in zip(rungs, rungs[1:]):
             expected = max(lo + anchor, -(-lo * 4 // 3))
             assert hi == -(-expected // anchor) * anchor, f"{lo} -> {hi}"
@@ -99,7 +95,7 @@ class TestBuckets:
     def test_kv_ladder_switches_to_powers_of_two_above_the_cap(self):
         b = SpyreAttnBucketer(make_config(max_model_len=32768))
         above = [kv for kv in b.kv_buckets if kv > _KV_DENSE_LADDER_CAP]
-        assert above == [8192, 16384, 32768]
+        assert above == [2048, 4096, 8192, 16384, 32768]
 
     @pytest.mark.parametrize("block_size", [64, 128, 192, 256])
     def test_kv_buckets_do_not_track_block_size(self, block_size):

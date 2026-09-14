@@ -51,11 +51,13 @@ _DEFAULT_QUERY_BUCKET_STEP = 512
 # starts here -- smaller batches never dispatch to a batched variant.
 _MIN_BATCHED_SEQS = 4
 
-# A padded block is a real KV read, so round-up costs decode latency: 4/3 bounds it
-# at a quarter of the bucket where powers of two cost a half.
+# A padded block is a real KV read, so round-up costs decode latency: 4/3 bounds it at
+# a quarter of the next rung, where powers of two cost a half.
 _TOKEN_BUCKET_STEP_NUM, _TOKEN_BUCKET_STEP_DEN = 4, 3
 _TOKEN_BUCKET_ANCHOR = 64
-_KV_DENSE_LADDER_CAP = 4096
+# Powers of two above the cap: a 4/3 rung just under a power of two rounds up past it,
+# so an uncapped ladder pads worse than pow2 there, and the denser rungs cost warmup.
+_KV_DENSE_LADDER_CAP = 1024
 
 
 @dataclass(frozen=True)
@@ -180,9 +182,8 @@ class SpyreAttnBucketer:
             lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
         )
 
-        # Default: 4/3-spaced up to _KV_DENSE_LADDER_CAP, powers of two above. Entries
-        # below block_size dedupe away in _num_blocks_buckets, so the anchor is a fixed
-        # token count rather than block_size.
+        # Anchored in tokens, not block_size: entries below block_size dedupe away in
+        # _num_blocks_buckets, which is what the kernel specializes on.
         def _default_kv() -> list[int]:
             cap = min(max_model_len, _KV_DENSE_LADDER_CAP)
             dense = list(_token_buckets_up_to(cap))
