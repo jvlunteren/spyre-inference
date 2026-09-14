@@ -51,10 +51,8 @@ _DEFAULT_QUERY_BUCKET_STEP = 512
 # starts here -- smaller batches never dispatch to a batched variant.
 _MIN_BATCHED_SEQS = 4
 
-# A padded block is a real KV read, so KV bucket round-up costs decode latency: 4/3
-# bounds it at a quarter of the bucket where powers of two cost a half. Only up to
-# _KV_DENSE_LADDER_CAP: above it the extra recorded variants outweigh the saving,
-# since padding is a shrinking fraction of a long context.
+# A padded block is a real KV read, so round-up costs decode latency: 4/3 bounds it
+# at a quarter of the bucket where powers of two cost a half.
 _TOKEN_BUCKET_STEP_NUM, _TOKEN_BUCKET_STEP_DEN = 4, 3
 _TOKEN_BUCKET_ANCHOR = 64
 _KV_DENSE_LADDER_CAP = 4096
