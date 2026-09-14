@@ -1907,11 +1907,10 @@ def test_batched_decode_chunking_covers_every_block(
 
     blocks_per_chunk is capped, not chosen as a divisor, so the block axis has to
     be padded up to a multiple of it. Neither bucket lattice is all powers of two
-    -- _powers_of_two_up_to appends n itself -- so an uneven pair is reachable
-    from ordinary engine args (max_model_len=1536 gives 12 blocks, and 8 does not
-    divide 12). Getting this wrong drops the tail blocks and then raises on the
-    mask reshape, i.e. crashes a decode step. Card-free on purpose: the
-    integration tests all land on power-of-two buckets, where it cannot fire.
+    -- the kv ladder steps by 4/3, and _powers_of_two_up_to appends n itself -- so
+    an uneven pair is reachable from ordinary engine args (max_model_len=1536
+    gives 12 blocks, and 8 does not divide 12). Getting this wrong drops the tail
+    blocks and then raises on the mask reshape, i.e. crashes a decode step.
     """
     from vllm.config import get_current_vllm_config
 
