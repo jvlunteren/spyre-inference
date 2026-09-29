@@ -165,6 +165,58 @@ class TestBuckets:
             assert b.kv_buckets == sorted(set(b.kv_buckets))
             assert b.query_buckets == sorted(set(b.query_buckets))
 
+    @pytest.mark.parametrize("ladder", ["pow2", "8_5", "4_3", "9_8", "uniform"])
+    @pytest.mark.parametrize("bs", [64, 128, 256])
+    @pytest.mark.parametrize("mml", [1024, 4096, 32768])
+    def test_no_preset_rounds_a_length_above_the_powers_of_two(self, monkeypatch, ladder, bs, mml):
+        """The guarantee the presets rest on: a denser ladder only ever subdivides."""
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=mml, block_size=bs))
+        pow2 = list(_powers_of_two_up_to(mml, start=bs))
+        for kv_len in range(1, mml + 1):
+            assert b.find_kv_bucket(kv_len) <= next(x for x in pow2 if x >= kv_len)
+
+    @pytest.mark.parametrize("ladder", ["pow2", "8_5", "4_3", "9_8", "uniform"])
+    @pytest.mark.parametrize("bs", [64, 128, 256])
+    def test_every_preset_bucket_is_a_whole_number_of_blocks(self, monkeypatch, ladder, bs):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=4096, block_size=bs))
+        assert all(kv % bs == 0 for kv in b.kv_buckets)
+
+    def test_the_presets_are_ordered_by_bucket_count_and_mean_overpay(self, monkeypatch):
+        """Denser presets cost more buckets and pad less on average.
+
+        Aggregates only: the presets are not supersets of each other, so a denser one
+        can lack a bucket a coarser one has (8_5 has 2688, 4_3 does not).
+        """
+        counts, overpay = [], []
+        for name in ("pow2", "8_5", "4_3", "9_8"):
+            monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", name)
+            envs.clear_env_cache()
+            buckets = SpyreAttnBucketer(make_config(max_model_len=4096)).kv_buckets
+            counts.append(len(buckets))
+            lengths = range(129, 4097)
+            overpay.append(
+                sum(next(b for b in buckets if b >= kv) / kv for kv in lengths) / len(lengths)
+            )
+        assert counts == sorted(counts), counts
+        assert overpay == sorted(overpay, reverse=True), overpay
+
+    def test_an_unknown_ladder_name_is_rejected_with_the_valid_set(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "7_4")
+        envs.clear_env_cache()
+        with pytest.raises(ValueError, match="8_5"):
+            SpyreAttnBucketer(make_config())
+
+    def test_explicit_buckets_still_win_over_a_preset(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "9_8")
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "256,1024")
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=4096))
+        assert b.kv_buckets == [256, 1024, 4096]
+
 
 class TestPoolingQueryBucketCap:
     """Pooling's query_len can't exceed max_model_len; without this cap, warmup
