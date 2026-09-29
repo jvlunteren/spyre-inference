@@ -1284,9 +1284,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
     def _batched_decode_supported(self) -> bool:
         """The batch-independent preconditions, so the warmup recorder can share them."""
-        # Batches below _MIN_BATCHED_SEQS take the per-seq loop regardless: the
-        # num_seqs ladder starts there, so they have no batched variant to
-        # dispatch to. Set SPYRE_BATCHED_DECODE=0 to force the loop for all sizes.
+        # Set SPYRE_BATCHED_DECODE=0 to force the per-seq loop for all sizes.
         if not envs.SPYRE_BATCHED_DECODE:
             return False
         # Under the tiled walk, batched decode is validated only where the backend
