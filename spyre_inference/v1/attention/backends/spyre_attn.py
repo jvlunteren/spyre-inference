@@ -709,7 +709,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-        batched_decode: bool = True,
+        per_seq_only: bool = False,
     ) -> SpyreAttentionMetadata:
         """Build attention metadata from common metadata."""
 
@@ -915,7 +915,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         chunk_page_ids_cpu = None
         mask_by_chunk_cpu = None
         decode_uniformity = 0.0
-        if batched_decode and envs.SPYRE_BATCHED_DECODE and num_decode_seqs > 0:
+        if not per_seq_only and envs.SPYRE_BATCHED_DECODE and num_decode_seqs > 0:
             # Real counts for the decode prefix only — same reasoning as before.
             blocks_per_seq = real_num_blocks if active_block_indices is None else num_active
 
@@ -1045,7 +1045,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 slot_mapping=torch.zeros(query_len, dtype=torch.int64),
                 causal=True,
             ),
-            batched_decode=False,
+            per_seq_only=True,
         )
 
     def build_for_batched_decode_variant(
