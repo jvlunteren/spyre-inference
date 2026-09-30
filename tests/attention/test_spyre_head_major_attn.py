@@ -532,6 +532,11 @@ def test_head_major_dispatches_by_query_width(
     wide query to the decode kernel pays for residency the query width already amortises."""
     from spyre_inference.v1.attention.backends import spyre_head_major_attn as hm
 
+    # Batched decode now covers every batch size, and it serves a mixed batch's decode
+    # prefix before the per-seq loop runs, so the per-seq kernels are the subject here.
+    monkeypatch.setenv("SPYRE_BATCHED_DECODE", "0")
+    envs.clear_env_cache()
+
     called = []
 
     def spy(name, fn):
