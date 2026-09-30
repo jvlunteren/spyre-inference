@@ -710,6 +710,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        batched_decode: bool = True,
     ) -> SpyreAttentionMetadata:
         """Build attention metadata from common metadata."""
 
@@ -915,7 +917,7 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         chunk_page_ids_cpu = None
         mask_by_chunk_cpu = None
         decode_uniformity = 0.0
-        if envs.SPYRE_BATCHED_DECODE and num_decode_seqs >= _MIN_BATCHED_SEQS:
+        if batched_decode and envs.SPYRE_BATCHED_DECODE and num_decode_seqs >= _MIN_BATCHED_SEQS:
             # Real counts for the decode prefix only — same reasoning as before.
             blocks_per_seq = real_num_blocks if active_block_indices is None else num_active
 
@@ -1021,7 +1023,11 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
         )
 
     def build_for_variant(self, bucket: SpyreAttnBucket) -> SpyreAttentionMetadata:
-        """Metadata for the one-sequence batch that dispatches to ``bucket``."""
+        """Metadata for the one-sequence batch that runs ``bucket`` through the per-seq loop.
+
+        A variant stands for every request of its shape, prefill or decode alike: the loop
+        picks its kernel by query width and block count alone.
+        """
         query_len = self._attn_bucketer.min_real_query_len(bucket.padded_query_len)
         kv_len = bucket.num_blocks * self.block_size
         assert query_len <= kv_len, f"{bucket} pairs a query length no sequence can reach"
@@ -1040,10 +1046,8 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                 block_table_tensor=torch.zeros(1, bucket.num_blocks, dtype=torch.int32),
                 slot_mapping=torch.zeros(query_len, dtype=torch.int64),
                 causal=True,
-                # A prefill at every width, one token included, so the variant runs
-                # through the per-seq loop whose kernel it records.
-                is_prefilling=torch.tensor([True]),
             ),
+            batched_decode=False,
         )
 
     def build_for_batched_decode_variant(
