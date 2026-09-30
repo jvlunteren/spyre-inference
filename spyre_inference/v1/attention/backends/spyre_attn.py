@@ -1302,11 +1302,18 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         """Whether batched decode may run under the tiled walk; overridable."""
         return False
 
-    def _batched_decode_preconditions_met(self, attn_metadata: "SpyreAttentionMetadata") -> bool:
+    def _batched_decode_preconditions_met(
+        self, attn_metadata: "SpyreAttentionMetadata", num_pages: int
+    ) -> bool:
         if not self._batched_decode_supported():
             return False
         # Layer 0's builder gates on the decode count and the bucket lattice.
         if attn_metadata.padded_num_seqs is None:
+            return False
+        assert attn_metadata.blocks_per_chunk is not None
+        # The recorder's bound: a gather of the whole cache faults the device
+        # (torch-spyre#4033), so warmup skips these variants and the per-seq loop serves them.
+        if attn_metadata.padded_num_seqs * attn_metadata.blocks_per_chunk >= num_pages:
             return False
         return attn_metadata.decode_uniformity >= _BATCHED_DECODE_MIN_UNIFORMITY
 
@@ -1345,7 +1352,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         # layers whose impl can actually use the batched kernel (skips ALiBi
         # and soft-cap layers).
         if (
-            self._batched_decode_preconditions_met(attn_metadata)
+            self._batched_decode_preconditions_met(attn_metadata, k_pages.shape[0])
             and attn_metadata.rep_row_ids_dev is None
         ):
             self._mirror_batched_decode_indices(attn_metadata, _target_device)
@@ -1853,7 +1860,7 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
 
         num_decode_seqs = attn_metadata.num_decode_seqs
         batched_done = False
-        if self._batched_decode_preconditions_met(attn_metadata):
+        if self._batched_decode_preconditions_met(attn_metadata, k_pages.shape[0]):
             self._run_batched_decode_dispatch(query_dev, k_pages, v_pages, attn_metadata, output)
             if num_decode_seqs == num_seqs:
                 return output

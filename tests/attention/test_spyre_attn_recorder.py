@@ -160,8 +160,8 @@ def _dispatch(impl, builder, kv_cache, num_blocks, padded_query_len):
 def _dispatch_batched(impl, builder, kv_cache, bucket):
     """``_dispatch`` for the batched decode kernel.
 
-    The page budget is unbounded: real dispatch has no such check, so this traces
-    whatever the bucket realizes onto, the way a request would.
+    The recorder's page budget is unbounded so this traces whatever the bucket realizes
+    onto, the way a request would; ``forward`` still applies dispatch's own page bound.
     """
     impl._record_batched_one(bucket, MagicMock(), kv_cache, builder, set(), sys.maxsize)
 
