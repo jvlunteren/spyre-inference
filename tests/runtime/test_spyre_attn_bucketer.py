@@ -268,8 +268,8 @@ class TestVariants:
         b = SpyreAttnBucketer(make_config(32768, 2048))
         assert len(b.variants()) < 500
 
-    def test_num_seqs_buckets_ladder_from_min_batched_to_max_num_seqs(self):
-        """The ladder starts at _MIN_BATCHED_SEQS and tops out at max_num_seqs."""
+    def test_num_seqs_buckets_ladder_from_one_to_max_num_seqs(self):
+        """The ladder starts at 1 and tops out at max_num_seqs."""
         assert SpyreAttnBucketer(make_config(max_num_seqs=8)).num_seqs_buckets == [1, 2, 4, 8]
         assert SpyreAttnBucketer(make_config(max_num_seqs=6)).num_seqs_buckets == [1, 2, 4, 6]
 
@@ -443,7 +443,7 @@ class TestRecorderBuilders:
         vllm_config.cache_config.block_size = BLOCK_SIZE
         bucketer = SpyreAttnBucketer(vllm_config)
 
-        # 4 blocks of real KV, and enough sequences to clear _MIN_BATCHED_SEQS.
+        # 4 blocks of real KV.
         metadata = _padded_mask_metadata(
             [(1, 4 * BLOCK_SIZE)] * 4, max_num_blocks=bucketer.num_blocks_buckets[-1]
         )

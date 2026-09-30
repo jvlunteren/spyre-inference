@@ -42,7 +42,6 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     _build_query_row_tables,
 )
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
-    _MIN_BATCHED_SEQS,
     SpyreAttnBucket,
     SpyreAttnBucketer,
 )
@@ -734,7 +733,7 @@ class TestRecordBatchedDecode:
             for v in bucketer.batched_decode_variants()
         }
 
-        for num_seqs in (_MIN_BATCHED_SEQS, _MIN_BATCHED_SEQS + 1):
+        for num_seqs in (1, 2):
             for kv_len in (65, 200):
                 metadata = _padded_mask_metadata(
                     [(1, kv_len)] * num_seqs,
