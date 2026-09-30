@@ -466,6 +466,20 @@ class TestRecordGraphs:
         assert "every shape will compile on first use" in caplog.text
 
 
+@pytest.mark.parametrize("num_blocks", [1, 2, 4])
+def test_one_token_variant_records_the_per_seq_kernel(builder, monkeypatch, num_blocks):
+    """A one-token decode goes to the batched kernel, so the per-seq width-1 variant
+    must be built as a prefill: that is the only way a batch reaches it (a chunked
+    prompt's one-token tail), and a decode build never traces it."""
+    monkeypatch.setenv("SPYRE_BATCHED_DECODE", "1")
+    envs.clear_env_cache()
+
+    metadata = builder.build_for_variant(SpyreAttnBucket(num_blocks, 1))
+
+    assert metadata.num_decode_seqs == 0
+    assert metadata.padded_num_seqs is None
+
+
 class TestRecompileLimit:
     def test_limit_is_raised_during_recording_and_restored(self, impl, kv_cache, builder):
         """Dynamo's accumulated limit is global, so more buckets than it allows would
