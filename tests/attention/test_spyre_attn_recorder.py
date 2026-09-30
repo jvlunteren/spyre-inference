@@ -468,9 +468,8 @@ class TestRecordGraphs:
 
 @pytest.mark.parametrize("num_blocks", [1, 2, 4])
 def test_one_token_variant_records_the_per_seq_kernel(builder, monkeypatch, num_blocks):
-    """A one-token decode goes to the batched kernel, so the per-seq width-1 variant
-    must be built as a prefill: that is the only way a batch reaches it (a chunked
-    prompt's one-token tail), and a decode build never traces it."""
+    """The one-token per-seq variant is built as a prefill, so recording it runs the
+    per-seq loop rather than the batched decode kernel."""
     monkeypatch.setenv("SPYRE_BATCHED_DECODE", "1")
     envs.clear_env_cache()
 
