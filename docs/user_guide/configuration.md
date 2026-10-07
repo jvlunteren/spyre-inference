@@ -153,7 +153,6 @@ export SPYRE_ATTN_KV_BUCKETS=256,1024,2048    # default: powers of two unioned w
 export SPYRE_ATTN_QUERY_BUCKETS=1,512         # 1 = decode; 512 = prefill chunk
 ```
 
-
 The default KV buckets union the powers of two with an 8/5 geometric series on a 64-token
 grain. Keeping every power of two is what makes the union safe: a KV length can only round
 down relative to a pure power-of-two ladder, never up. The ladder stays geometric rather
