@@ -854,6 +854,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#host-side-sampling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host-side sampling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1752,6 +1763,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#host-side-sampling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host-side sampling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2251,6 +2273,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#host-side-sampling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Host-side sampling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#transformers-backend" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2335,7 +2368,9 @@ ops injected via OOT registration.</p>
 <p><code>vLLM</code> is built from source with <code>VLLM_TARGET_DEVICE=empty</code> (no device-specific C
 kernels), so the platform overrides a few CPU-backend assumptions: <code>import_kernels()</code> is
 a no-op (there is no <code>vllm._C</code>), and the model runner reimplements the slot-mapping
-kernel in pure PyTorch.</p>
+kernel in pure PyTorch. The host-side sampling kernels vLLM's CPU backend would supply
+are built by the plugin itself, as <code>spyre_inference._C</code> (see
+<a href="#host-side-sampling">Host-side sampling</a>).</p>
 <h2 id="component-view-of-a-granite-model">Component view of a Granite model<a class="headerlink" href="#component-view-of-a-granite-model" title="Permanent link">&para;</a></h2>
 <figure>
   <img alt="Plugin Architecture" src="plugin-architecture.svg" style="width: 140%; max-width: 1000px; margin-left: -20%" />
@@ -2351,8 +2386,8 @@ kernel in pure PyTorch.</p>
 run upstream in the compiled graph). Most replacements are pure class swaps that run
 when the ops package is imported. <code>register_all()</code> additionally registers the <code>spyre_convert</code>
 custom op — the <code>convert</code> helper keeps device transfers invisible to <code>torch.compile</code>.
-RoPE registers no op — its rotation-cache gather and 2×2 rotation run directly in the
-compiled graph (see below).</p>
+RoPE registers no op — its rotation-cache gather and rotation (2×2, or split-free for a
+sub-stick half) run directly in the compiled graph (see below).</p>
 <table>
 <thead>
 <tr>
@@ -2373,7 +2408,7 @@ compiled graph (see below).</p>
 <td><code>RotaryEmbedding</code>, <code>Llama3RotaryEmbedding</code>, <code>YaRNScalingRotaryEmbedding</code>, <code>Gemma4RotaryEmbedding</code></td>
 <td><code>SpyreRotaryEmbedding</code>, <code>SpyreLlama3RotaryEmbedding</code>, <code>SpyreYaRNScalingRotaryEmbedding</code>, <code>SpyreGemma4RotaryEmbedding</code></td>
 <td>Spyre</td>
-<td>Fully on-device, no opaque op. A <code>[max_pos, 2, 2, rotary_dim//2]</code> rotation cache is built from <code>cos_sin_cache</code>, flattened to 2-D with the position axis outermost, and <strong>primed on-device in <code>_apply</code> before <code>torch.compile</code></strong>; <code>forward_oot</code> then gathers this pass's per-token slice with <code>index_select</code> and applies the 2×2 rotation-matrix formulation (<code>_rotate_neox_2x2</code>) — both traced directly into the enclosing block graph. Priming before compile is the requirement: building the cache lazily inside the traced forward segfaults libsenlib during warmup, whereas a cache already materialized on-device indexes cleanly. Only neox-style full rotary is supported — other configs raise <code>NotImplementedError</code> at construction. The 2×2 inner dim <code>rotary_dim//2</code> must also be stick-aligned; this is not re-checked but is guaranteed by head-dim padding (see below)</td>
+<td>Fully on-device, no opaque op. A <code>[max_pos, 2, 2, rotary_dim//2]</code> rotation cache is built from <code>cos_sin_cache</code>, flattened to 2-D with the position axis outermost, and <strong>primed on-device in <code>_apply</code> before <code>torch.compile</code></strong>; <code>forward_oot</code> then gathers this pass's per-token slice with <code>index_select</code> and applies the 2×2 rotation-matrix formulation (<code>_rotate_neox_2x2</code>) — both traced directly into the enclosing block graph. Priming before compile is the requirement: building the cache lazily inside the traced forward segfaults libsenlib during warmup, whereas a cache already materialized on-device indexes cleanly. Only neox-style full rotary is supported — other configs raise <code>NotImplementedError</code> at construction. The 2×2 form views a head as two halves, so it needs a stick-aligned <code>rotary_dim//2</code>. A head whose half is sub-stick (<code>head_size=64</code>) takes <code>_rotate_neox_split_free</code> instead: <code>x * cos + rotate_half(x) * sin</code>, with <code>rotate_half</code> as a matmul by a fixed signed permutation, so every view is a whole head. Its cache is <code>[max_pos, 2 * head_size]</code>, laid out <code>[cos \| cos \| sin \| sin]</code>. Head-dim padding then only has to make a head stick-aligned, so the native path pads to the next 64-multiple</td>
 </tr>
 <tr>
 <td><code>VocabParallelEmbedding</code></td>
@@ -2501,10 +2536,10 @@ unquantized oracle leaves open for an out-of-tree platform.</p>
   narrower <code>M</code> — zero-widened to whole sticks where a shard lands mid-stick — and
   <code>MoERunner</code> all-reduces the per-rank partial sums. Each model's own adaptation module
   supplies its recipe and any model-owned scaling (<code>configure_gemma4_moe_layers</code> in
-  <code>models/gemma4.py</code>). <code>Gemma4DecoderLayer.forward</code> and <code>MoERunner</code> are untouched: vLLM
-  reaches the experts through <code>torch.ops.vllm.moe_forward</code>, an opaque custom op, so the
-  dispatch runs eagerly <em>inside</em> the block's compiled graph — the same seam the attention
-  backend uses — and can drive compiled regions of its own.</li>
+  <code>models/gemma4.py</code>). <code>Gemma4DecoderLayer.forward</code> is untouched. <code>SpyreMoERunner</code>, an OOT
+  <code>MoERunner</code>, takes vLLM's direct <code>_moe_forward</code> entry — as upstream does on CPU and TPU —
+  instead of the opaque <code>torch.ops.vllm.moe_forward</code> custom op, so a compiled block traces
+  the expert forms into its own graph; an eager run dispatches them to compiled regions.</li>
 </ul>
 <h2 id="compilation-granularity">Compilation Granularity<a class="headerlink" href="#compilation-granularity" title="Permanent link">&para;</a></h2>
 <p>Under <code>CompilationMode.STOCK_TORCH_COMPILE</code>, <code>_compile_for_spyre</code> compiles each entry of
@@ -2817,6 +2852,52 @@ Eligible decode prefixes use batched attention, even at one sequence; otherwise 
 per-sequence loop is host-driven control flow, but its query-row gather and kernels run
 on Spyre. KV-cache writes and any separate write-back copy stay on-device. RoPE's
 rotation-cache gather and the embedding gather also run on-device.</p>
+<h2 id="host-side-sampling">Host-side sampling<a class="headerlink" href="#host-side-sampling" title="Permanent link">&para;</a></h2>
+<p><code>SpyreLogitsProcessor</code> hands the sampler CPU logits, so every sampling step runs on the
+host, serially between device forwards. vLLM picks its sampler path by platform:
+<code>TorchSpyrePlatform</code> is <code>PlatformEnum.OOT</code>, so <code>is_cpu()</code> is <code>False</code>, and
+<code>TopKTopPSampler</code> falls through to <code>forward_native</code> — eager PyTorch, with none of the
+fused kernels upstream reserves for <code>forward_cpu</code>. Left as is, that path sorts the full
+<code>[batch, vocab]</code> logits for top-k/top-p and generates a fresh <code>[batch, vocab]</code> noise tensor
+for every random draw, each a separate pass over memory. At a 262k vocabulary that is a
+large share of each decode step.</p>
+<p><code>SpyreModelRunner</code> patches upstream's <code>Sampler</code> in place after construction, pointing its
+greedy draw at <code>greedy_sample</code> (<code>v1/sample/sampler.py</code>) and its random draw at
+<code>SpyreTopKTopPSampler</code>, so every holder of it, the rejection sampler included, samples the
+same way. That brings back the CPU kernels and drops the full-vocabulary sort:</p>
+<ul>
+<li><strong>Random draw</strong> — <code>SpyreTopKTopPSampler.forward_native</code> calls
+  <code>torch.ops._spyre_C.fused_gumbel_argmax</code>: one pass of <code>argmax(logits + g)</code>, with the
+  Gumbel noise <code>g</code> hashed per element from a per-row seed (splitmix64 of <code>(seed, i)</code>), so
+  there is no softmax and no noise tensor. The noise is bounded, so tokens too far below the
+  running best (including every <code>-inf</code> left by top-k/top-p) are skipped exactly, and most
+  others are rejected with one <code>exp</code> before the two <code>log</code>s of the Gumbel transform. A
+  seeded request draws its row seed from its own <code>torch.Generator</code>, so it stays
+  reproducible. <code>use_fp64_gumbel</code> keeps fresh fp64 noise, drawn in log space
+  (<code>argmax(x - log q)</code>, <code>q ~ Exp(1)</code>). vLLM's kernel reads its noise from a fixed 2^20-entry
+  table instead, which limits each row to 2^20 noise windows and leaves much of a large
+  vocabulary unreachable.</li>
+<li><strong>Greedy</strong> — <code>greedy_sample</code> calls <code>torch.ops._spyre_C.greedy_argmax</code>, a
+  vectorized max followed by a first-match scan, so ties break like <code>torch.argmax</code>. A
+  single row falls back to <code>torch.argmax</code>, where OpenMP fork/join would cost more than the
+  scan.</li>
+<li><strong>Top-k + top-p</strong> — <code>apply_top_k_top_p_sort_free</code> takes a <code>topk</code> window of <code>2 × max_k</code>
+  instead of sorting the vocabulary, and runs top-p's softmax and cumsum over that window
+  only. vLLM keeps every token tied with a row's k-th value, so the window widens to the
+  exact tie count when ties run past it. Top-p without top-k still sorts.</li>
+</ul>
+<p>The kernels live in <code>csrc/cpu/sampling_kernels.cpp</code> and are built with CMake from
+<code>setup.py</code>, over the <code>cpu_types_{x86,vsx,vxe}.hpp</code> SIMD headers copied unchanged from vLLM,
+so x86, POWER and s390x all get vector code. x86 ships an AVX512 build (<code>_C</code>) and an
+AVX2 fallback (<code>_C_AVX2</code>), and <code>v1/sample/sampling_kernels.py</code> imports whichever the host
+supports, as vLLM's CPU backend does. The ops register under the fixed <code>_spyre_C</code>
+namespace rather than <code>TORCH_EXTENSION_NAME</code>, so the two builds share one op name and
+cannot collide with a vLLM <code>_C</code> in the same environment. If the extension
+is missing or fails to import (a failed build, or a dev checkout that never built it), the
+import logs a warning and the samplers fall back to <code>torch.argmax</code> and a fresh-noise
+log-space draw. Because the sampler reimplements
+the tail of upstream <code>TopKTopPSampler.forward_native</code>, it has to be re-synced on a vLLM
+bump.</p>
 <h2 id="transformers-backend">Transformers backend<a class="headerlink" href="#transformers-backend" title="Permanent link">&para;</a></h2>
 <p>When <code>model_impl="transformers"</code>, <code>register_ops</code> swaps vLLM's <code>TransformersForCausalLM</code>
 for <code>SpyreTransformersForCausalLM</code> (<code>spyre_inference/transformers_backend.py</code>). vLLM's
@@ -2829,9 +2910,10 @@ HF's <code>rotary_emb</code> survives and would derive cos/sin inside the forwar
 <code>[max_model_len, 2, 2, head_dim/2]</code> rotation cache — built on the host and moved to the
 device before compile, leaving only an <code>index_select</code> in the graph — plus an
 <code>apply_rotary_pos_emb</code> that applies the 2×2 rotation by multiply-and-reduce rather than
-HF's <code>rotate_half</code> slicing. Head padding is shared with the native path: the platform widens
-<code>head_dim</code> and the weight passes in <code>head_pad.py</code> pad Q/K interleaved, so this backend
-only has to rebuild the rotation cache at the pre-pad frequencies.</p>
+HF's <code>rotate_half</code> slicing. That rotation still views a head as two halves, so here the
+platform widens <code>head_dim</code> to the next 128-multiple, not the native path's 64-multiple. The
+weight passes in <code>head_pad.py</code> are shared with the native path and pad Q/K interleaved, so
+this backend only has to rebuild the rotation cache at the pre-pad frequencies.</p>
 <p><code>RMSNorm</code> registers no OOT op: upstream <code>forward_native</code> lowers its fp16→fp32 upcast
 into the compiled graph. <code>GemmaRMSNorm</code> still needs one, because its trailing fp32
 <code>weight</code> multiply hits a torch-spyre gap — a STANDARD <code>[hidden]</code> operand that can
