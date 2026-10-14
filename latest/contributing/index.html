@@ -93,7 +93,7 @@
     You are viewing development docs. <a href="https://torch-spyre.github.io/spyre-inference/lateststable/">Click here</a> to view docs for the latest stable release.
   </p>
   <script>
-    if (window.location.pathname.includes('/latest/')) {
+    if (globalThis.location.pathname.includes('/latest/')) {
       document.getElementById('dev-banner').style.display = '';
     }
   </script>
@@ -2430,7 +2430,7 @@ regression. Each decoder case prints <code>compared &lt;n&gt;/&lt;total&gt; refe
 its prompts want replacing — not that the model regressed. The one coverage failure is zero:
 a case where every prompt diverged on its first step asserted nothing at all.</p>
 <h4 id="upstream-test-integration">Upstream Test Integration<a class="headerlink" href="#upstream-test-integration" title="Permanent link">&para;</a></h4>
-<p>Upstream tests are cloned from the vLLM repository at the commit pinned in <code>pyproject.toml</code>, fetching only the <code>tests/</code> directory. The clone happens on demand, the first time a run asks for upstream tests (see the marker gate above). Cloned tests are cached in <code>~/.cache/vllm-upstream-tests</code> (or <code>$XDG_CACHE_HOME/vllm-upstream-tests</code>) with separate worktrees per commit, allowing multiple vLLM versions to be tested simultaneously. All upstream tests run with <code>VLLM_PLUGINS=spyre_inference,spyre_inference_ops</code> set automatically. Pointing the plugin at a vLLM checkout instead of the cache is the one case that still needs the flag by hand: <code>pytest -p spyre_testing_plugin.pytest_plugin -m upstream</code> from the checkout root. See <code>tests/plugin/spyre_testing_plugin/pytest_plugin.py</code> for implementation details.</p>
+<p>Upstream tests are cloned from the vLLM repository at the commit pinned in <code>pyproject.toml</code>, fetching only the <code>tests/</code> directory. The clone happens on demand, the first time a run asks for upstream tests (see the marker gate above). Cloned tests are cached in <code>~/.cache/vllm-upstream-tests</code> (or <code>$XDG_CACHE_HOME/vllm-upstream-tests</code>) with separate worktrees per commit, allowing multiple vLLM versions to be tested simultaneously. All upstream tests run with <code>VLLM_PLUGINS=spyre_inference</code> set automatically. Pointing the plugin at a vLLM checkout instead of the cache is the one case that still needs the flag by hand: <code>pytest -p spyre_testing_plugin.pytest_plugin -m upstream</code> from the checkout root. See <code>tests/plugin/spyre_testing_plugin/pytest_plugin.py</code> for implementation details.</p>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
 <p>To force a re-clone, remove <code>~/.cache/vllm-upstream-tests</code>.</p>

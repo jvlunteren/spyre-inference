@@ -93,7 +93,7 @@
     You are viewing development docs. <a href="https://torch-spyre.github.io/spyre-inference/lateststable/">Click here</a> to view docs for the latest stable release.
   </p>
   <script>
-    if (window.location.pathname.includes('/latest/')) {
+    if (globalThis.location.pathname.includes('/latest/')) {
       document.getElementById('dev-banner').style.display = '';
     }
   </script>
@@ -2127,10 +2127,12 @@
 <h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
 <h2 id="plugin-setup">Plugin Setup<a class="headerlink" href="#plugin-setup" title="Permanent link">&para;</a></h2>
 <p>To load the plugin, set the <code>VLLM_PLUGINS</code> environment variable before running vLLM:</p>
-<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">VLLM_PLUGINS</span><span class="o">=</span>spyre_inference,spyre_inference_ops
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">VLLM_PLUGINS</span><span class="o">=</span>spyre_inference
 </span></code></pre></div>
-<p><code>spyre_inference</code> activates the platform, and <code>spyre_inference_ops</code> registers the OOT
-custom ops plus the Spyre Transformers backend (used for <code>model_impl="transformers"</code>).</p>
+<p><code>spyre_inference</code> names both the platform plugin and the general plugin: the first
+activates the platform, and the second registers the OOT custom ops and the Spyre
+model adaptations, including the Spyre Transformers backend (used for
+<code>model_impl="transformers"</code>).</p>
 <h2 id="usage">Usage<a class="headerlink" href="#usage" title="Permanent link">&para;</a></h2>
 <p>You can then use vLLM as usual:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">vllm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LLM</span>
