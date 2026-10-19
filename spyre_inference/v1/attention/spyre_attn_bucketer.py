@@ -131,11 +131,11 @@ def _uniform_union_up_to(n: int, block_size: int, step_div: int, knee_div: int) 
 _KV_LADDER_GRAIN_HORIZON = 32768
 
 
-def _geometric_union_up_to(n: int, block_size: int, numer: int, denom: int) -> list[int]:
+def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator: int) -> list[int]:
     def _series(grain: int, limit: int) -> list[int]:
         out = []
         v = grain
-        while (v := v * numer // denom) < limit:
+        while (v := v * numerator // denominator) < limit:
             if (r := v // grain * grain) > block_size:
                 out.append(r)
         return out
