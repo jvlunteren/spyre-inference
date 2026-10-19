@@ -194,7 +194,7 @@ class TestBuckets:
     @pytest.mark.parametrize("bs", [64, 128, 256])
     @pytest.mark.parametrize("mml", [3000, 4096, 5000, 32768])
     def test_every_preset_but_pow2_adds_buckets(self, monkeypatch, ladder, bs, mml):
-        # Not at 1024 / block_size 256: every 8_5 rung rounds onto a power of two there.
+        # Not at 1024 / block_size 256: every 8_5 bucket rounds onto a power of two there.
         monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config(max_model_len=mml, block_size=bs))

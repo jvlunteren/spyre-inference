@@ -140,7 +140,7 @@ def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator:
                 out.append(r)
         return out
 
-    # A 64-token grain leaves some rungs off whole blocks from block_size 128 upward.
+    # A 64-token grain leaves some buckets off whole blocks from block_size 128 upward.
     grain = 64
     if any(r % block_size for r in _series(grain, _KV_LADDER_GRAIN_HORIZON)):
         grain = block_size
@@ -149,7 +149,7 @@ def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator:
 
 
 # Every preset keeps the powers of two, so a KV length's bucket never moves up. Batched
-# decode pads blocks to whole chunks, so at one sequence some rungs save nothing there.
+# decode pads blocks to whole chunks, so at one sequence some buckets save nothing there.
 _KV_LADDERS: dict[str, Callable[[int, int], list[int]]] = {
     "pow2": lambda n, bs: list(_powers_of_two_up_to(n, start=bs)),
     "8_5": lambda n, bs: _geometric_union_up_to(n, bs, 8, 5),
