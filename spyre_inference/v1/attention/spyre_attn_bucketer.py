@@ -120,106 +120,74 @@ def _powers_of_two_up_to(n: int, start: int = 1) -> tuple[int, ...]:
     return tuple(result)
 
 
-_KV_LADDER_GRAIN = 64
+def _uniform_union_up_to(n: int, block_size: int, step_div: int, knee_div: int) -> list[int]:
+    step = max(block_size, (n // step_div) // block_size * block_size)
+    knee = max(block_size, (n // knee_div) // block_size * block_size)
+    extra = range(knee + step, n, step)
+    return sorted(set(_powers_of_two_up_to(n, start=block_size)) | set(extra) | {n})
 
-# Every preset keeps the powers of two, so a denser one only subdivides and a KV length's
-# bucket never moves up. "step" values are divisors of max_model_len, not token counts.
-_KV_LADDER_PRESETS: dict[str, tuple[str, int, int] | None] = {
-    "pow2": None,
-    "8_5": ("ratio", 8, 5),
-    "4_3": ("ratio", 4, 3),
-    "9_8": ("ratio", 9, 8),
-    "uniform": ("step", 8, 16),
+
+# Grain chosen up to here, not up to max_model_len, so the context never moves lower buckets.
+_KV_LADDER_GRAIN_HORIZON = 32768
+
+
+def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator: int) -> list[int]:
+    def _series(grain: int, limit: int) -> list[int]:
+        out = []
+        v = grain
+        while (v := v * numerator // denominator) < limit:
+            if (r := v // grain * grain) > block_size:
+                out.append(r)
+        return out
+
+    # A 64-token grain leaves some buckets off whole blocks from block_size 128 upward.
+    grain = 64
+    if any(r % block_size for r in _series(grain, _KV_LADDER_GRAIN_HORIZON)):
+        grain = block_size
+    series = {r // block_size * block_size for r in _series(grain, n)}
+    return sorted(set(_powers_of_two_up_to(n, start=block_size)) | series | {n})
+
+
+# Every preset keeps the powers of two, so a KV length's bucket never moves up. Batched
+# decode pads blocks to whole chunks, so at one sequence some buckets save nothing there.
+_KV_LADDERS: dict[str, Callable[[int, int], list[int]]] = {
+    "pow2": lambda n, bs: list(_powers_of_two_up_to(n, start=bs)),
+    "8_5": lambda n, bs: _geometric_union_up_to(n, bs, 8, 5),
+    "4_3": lambda n, bs: _geometric_union_up_to(n, bs, 4, 3),
+    "9_8": lambda n, bs: _geometric_union_up_to(n, bs, 9, 8),
+    "uniform": lambda n, bs: _uniform_union_up_to(n, bs, step_div=8, knee_div=16),
 }
 
 
-def _uniform_union_up_to(
-    n: int, start: int, block_size: int, step_div: int, knee_div: int
-) -> tuple[int, ...]:
-    """Powers of two in [start, n] unioned with an evenly spaced series above a knee."""
-    if n < 1:
-        return ()
-    step = max(block_size, (n // step_div) // block_size * block_size)
-    knee = max(block_size, n // knee_div)
-    extra = []
-    v = knee
-    while True:
-        v += step
-        if v >= n:
-            break
-        if v % block_size == 0:
-            extra.append(v)
-    return tuple(sorted(set(_powers_of_two_up_to(n, start=start)) | set(extra) | {n}))
-
-
-def _kv_ladder_steps(name: str) -> tuple[str, int, int] | None:
-    """The preset's spec, or None for bare powers of two."""
+def kv_ladder(name: str, var: str = "SPYRE_ATTN_KV_LADDER") -> Callable[[int, int], list[int]]:
     try:
-        return _KV_LADDER_PRESETS[name]
+        return _KV_LADDERS[name]
     except KeyError:
         raise ValueError(
-            f"SPYRE_ATTN_KV_LADDER={name!r} is not one of "
-            f"{sorted(_KV_LADDER_PRESETS)}. SPYRE_ATTN_KV_BUCKETS overrides the ladder "
-            f"entirely if none of these fit."
+            f"{var}={name!r} is not one of {sorted(_KV_LADDERS)}. "
+            "SPYRE_ATTN_KV_BUCKETS overrides the ladder entirely if none of these fit."
         ) from None
 
 
-def _geometric_union_up_to(
-    n: int,
-    start: int,
-    block_size: int,
-    steps: tuple[int, int] = (8, 5),
-    grain: int = _KV_LADDER_GRAIN,
-) -> tuple[int, ...]:
-    """Powers of two in [start, n] unioned with a geometric series, plus n itself.
-
-    Every power of two is kept, so a KV length's bucket can only move down relative
-    to the powers-of-two ladder, never up.
-    """
-    if n < 1:
-        return ()
-    number, denom = steps
-
-    def _series(step: int) -> list[int]:
-        out = []
-        v = step
-        while True:
-            v = v * number // denom
-            if v >= n:
-                return out
-            aligned = (v // step) * step
-            if aligned > start:
-                out.append(aligned)
-
-    # Whether a 64-token grain keeps every bucket a whole number of blocks depends on
-    # where this series lands, not on a divisibility rule: it fails from block_size 256.
-    if any(v % block_size for v in _series(grain)):
-        grain = block_size
-    return tuple(sorted(set(_powers_of_two_up_to(n, start=start)) | set(_series(grain)) | {n}))
+def large_batch_min_seqs() -> int:
+    raw = envs.SPYRE_ATTN_LARGE_BATCH_MIN_SEQS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise ValueError(f"SPYRE_ATTN_LARGE_BATCH_MIN_SEQS must be an integer >= 1, got {raw!r}")
+    return value
 
 
-def _build_kv_ladder(
-    spec: tuple[str, int, int] | None, max_model_len: int, block_size: int
-) -> list[int]:
-    """The preset's bucket list."""
-    if spec is None:
-        return list(_powers_of_two_up_to(max_model_len, start=block_size))
-    kind, first, second = spec
-    if kind == "step":
-        return list(
-            _uniform_union_up_to(
-                max_model_len,
-                start=block_size,
-                block_size=block_size,
-                step_div=first,
-                knee_div=second,
-            )
-        )
-    return list(
-        _geometric_union_up_to(
-            max_model_len, start=block_size, block_size=block_size, steps=(first, second)
-        )
-    )
+def validate_kv_ladder_env() -> None:
+    # SPYRE_ATTN_KV_BUCKETS replaces both ladders, so neither name is read then.
+    large_batch_min_seqs()
+    if envs.SPYRE_ATTN_KV_BUCKETS:
+        return
+    kv_ladder(envs.SPYRE_ATTN_KV_LADDER)
+    if envs.SPYRE_ATTN_KV_LADDER_LARGE_BATCH:
+        kv_ladder(envs.SPYRE_ATTN_KV_LADDER_LARGE_BATCH, "SPYRE_ATTN_KV_LADDER_LARGE_BATCH")
 
 
 def _min_num_kv_heads(vllm_config: VllmConfig) -> int:
@@ -330,15 +298,13 @@ class SpyreAttnBucketer:
             lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
         )
 
-        # Default: powers of two from block_size up to max_model_len. Geometric
-        # because the recorded set is a product of both axes; the extra padding
-        # each bucket costs is absorbed by the mask.
-        steps = _kv_ladder_steps(envs.SPYRE_ATTN_KV_LADDER)
+        # Default: the SPYRE_ATTN_KV_LADDER preset. Geometric because the recorded set
+        # is a product of both axes; the extra padding each bucket costs is absorbed by the mask.
         self._kv_buckets: list[int] = _resolve_buckets(
             envs.SPYRE_ATTN_KV_BUCKETS,
             max_model_len,
             "SPYRE_ATTN_KV_BUCKETS",
-            lambda: _build_kv_ladder(steps, max_model_len, block_size),
+            lambda: kv_ladder(envs.SPYRE_ATTN_KV_LADDER)(max_model_len, block_size),
         )
 
         # num_blocks is what the kernel specializes on. Derived from the kv
@@ -356,17 +322,38 @@ class SpyreAttnBucketer:
 
         # Batched decode only: below the threshold the chunking already pads to whole chunks,
         # so dense buckets there mostly compile duplicate kernels. Unioned, so none rounds up.
-        self._large_batch_min_seqs = envs.SPYRE_ATTN_LARGE_BATCH_MIN_SEQS
+        self._large_batch_min_seqs = large_batch_min_seqs()
         self._large_batch_blocks_buckets = self._num_blocks_buckets
         large = envs.SPYRE_ATTN_KV_LADDER_LARGE_BATCH
-        if large and not envs.SPYRE_ATTN_KV_BUCKETS:
-            dense = _build_kv_ladder(_kv_ladder_steps(large), max_model_len, block_size)
+        if large and envs.SPYRE_ATTN_KV_BUCKETS:
+            logger.warning(
+                "SPYRE_ATTN_KV_LADDER_LARGE_BATCH=%s is ignored: SPYRE_ATTN_KV_BUCKETS is set.",
+                large,
+            )
+        elif large and self._large_batch_min_seqs > self._num_seqs_buckets[-1]:
+            logger.warning(
+                "SPYRE_ATTN_KV_LADDER_LARGE_BATCH=%s never applies: "
+                "SPYRE_ATTN_LARGE_BATCH_MIN_SEQS=%d is above the largest num_seqs bucket %d.",
+                large,
+                self._large_batch_min_seqs,
+                self._num_seqs_buckets[-1],
+            )
+        elif large:
+            dense = kv_ladder(large, "SPYRE_ATTN_KV_LADDER_LARGE_BATCH")(max_model_len, block_size)
             self._large_batch_blocks_buckets = sorted(
                 set(self._num_blocks_buckets)
                 | {
                     max(self._num_blocks_buckets[0], (kv + block_size - 1) // block_size)
                     for kv in dense
                 }
+            )
+            logger.info(
+                "SpyreAttnBucketer: batched decode at >= %d seqs uses %d num_blocks buckets "
+                "(%s) instead of %d.",
+                self._large_batch_min_seqs,
+                len(self._large_batch_blocks_buckets),
+                large,
+                len(self._num_blocks_buckets),
             )
 
         logger.info(
