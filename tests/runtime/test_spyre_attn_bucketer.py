@@ -23,7 +23,6 @@ import pytest
 from spyre_inference import envs
 from spyre_inference.v1.attention.spyre_attn_bucketer import (
     SpyreAttnBucketer,
-    _geometric_union_up_to,
     _parse_buckets,
     _powers_of_two_up_to,
     batched_decode_chunking,
@@ -61,8 +60,8 @@ def make_config(
             layer.kv = n
             layers.append(layer)
         arch.__getitem__.side_effect = layers.__getitem__
-        config.model_config.get_num_kv_heads.side_effect = (
-            lambda _pc, arch_config=None: num_kv_heads if arch_config is None else arch_config.kv
+        config.model_config.get_num_kv_heads.side_effect = lambda _pc, arch_config=None: (
+            num_kv_heads if arch_config is None else arch_config.kv
         )
     return config
 
@@ -72,8 +71,8 @@ def _list_pow2(limit: int, start: int = 1) -> list[int]:
     return list(_powers_of_two_up_to(limit, start=start))
 
 
-def _list_default(limit, start=BLOCK_SIZE, block_size=None):
-    return list(_geometric_union_up_to(limit, start=start, block_size=block_size or start))
+def _list_default(limit, start=BLOCK_SIZE):
+    return _list_pow2(limit, start=start)
 
 
 @pytest.fixture()
@@ -97,11 +96,26 @@ class TestBuckets:
     def test_kv_buckets_contain_every_power_of_two(self, bucketer):
         assert set(_list_pow2(2048, start=BLOCK_SIZE)) <= set(bucketer.kv_buckets)
 
-    def test_kv_buckets_are_denser_than_powers_of_two(self, bucketer):
-        assert len(bucketer.kv_buckets) > len(_list_pow2(2048, start=BLOCK_SIZE))
+    def test_8_5_ladder_is_denser_than_powers_of_two(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "8_5")
+        b = SpyreAttnBucketer(make_config())
+        assert b.kv_buckets == [64, 128, 256, 384, 512, 640, 1024, 1664, 2048]
+
+    @pytest.mark.parametrize("max_model_len", [8192, 40960, 65536, 131072])
+    def test_8_5_ladder_below_a_length_does_not_depend_on_max_model_len(
+        self, monkeypatch, max_model_len
+    ):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "8_5")
+        b = SpyreAttnBucketer(make_config(max_model_len=max_model_len, block_size=128))
+        short = [v for v in b.kv_buckets if v <= 4096]
+        assert short == [128, 256, 384, 512, 640, 1024, 1664, 2048, 2688, 4096]
+        assert all(v % 128 == 0 for v in b.kv_buckets)
 
     @pytest.mark.parametrize("max_model_len", [2048, 4096, 8192, 16384, 32768])
-    def test_kv_buckets_never_round_up_further_than_powers_of_two(self, max_model_len):
+    def test_8_5_ladder_never_rounds_up_further_than_powers_of_two(
+        self, monkeypatch, max_model_len
+    ):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "8_5")
         b = SpyreAttnBucketer(make_config(max_model_len=max_model_len))
         pow2 = _list_pow2(max_model_len, start=BLOCK_SIZE)
 
@@ -129,10 +143,10 @@ class TestBuckets:
 
     def test_kv_buckets_round_non_power_of_two_block_size_up(self):
         """The platform only forces block_size to a multiple of 64, so a
-        non-power-of-two value is reachable; buckets stay a clean doubling
+        non-power-of-two value is reachable; the default ladder stays a clean doubling
         sequence by starting at the next power of two."""
         b = SpyreAttnBucketer(make_config(max_model_len=4096, block_size=192))
-        assert b.kv_buckets == _list_default(4096, start=256, block_size=192)
+        assert b.kv_buckets == _list_default(4096, start=256)
         assert b.kv_buckets[0] == 256
 
     def test_query_buckets_lead_with_decode_case(self, bucketer):
@@ -167,9 +181,8 @@ class TestBuckets:
 
     @pytest.mark.parametrize("ladder", ["pow2", "8_5", "4_3", "9_8", "uniform"])
     @pytest.mark.parametrize("bs", [64, 128, 256])
-    @pytest.mark.parametrize("mml", [1024, 4096, 32768])
+    @pytest.mark.parametrize("mml", [1024, 3000, 4096, 5000, 32768])
     def test_no_preset_rounds_a_length_above_the_powers_of_two(self, monkeypatch, ladder, bs, mml):
-        """The guarantee the presets rest on: a denser ladder only ever subdivides."""
         monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
         envs.clear_env_cache()
         b = SpyreAttnBucketer(make_config(max_model_len=mml, block_size=bs))
@@ -177,20 +190,28 @@ class TestBuckets:
         for kv_len in range(1, mml + 1):
             assert b.find_kv_bucket(kv_len) <= next(x for x in pow2 if x >= kv_len)
 
-    @pytest.mark.parametrize("ladder", ["pow2", "8_5", "4_3", "9_8", "uniform"])
+    @pytest.mark.parametrize("ladder", ["8_5", "4_3", "9_8", "uniform"])
     @pytest.mark.parametrize("bs", [64, 128, 256])
-    def test_every_preset_bucket_is_a_whole_number_of_blocks(self, monkeypatch, ladder, bs):
+    @pytest.mark.parametrize("mml", [3000, 4096, 5000, 32768])
+    def test_every_preset_but_pow2_adds_buckets(self, monkeypatch, ladder, bs, mml):
+        # Not at 1024 / block_size 256: every 8_5 rung rounds onto a power of two there.
         monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
         envs.clear_env_cache()
-        b = SpyreAttnBucketer(make_config(max_model_len=4096, block_size=bs))
-        assert all(kv % bs == 0 for kv in b.kv_buckets)
+        b = SpyreAttnBucketer(make_config(max_model_len=mml, block_size=bs))
+        assert set(b.kv_buckets) > set(_powers_of_two_up_to(mml, start=bs))
+
+    @pytest.mark.parametrize("ladder", ["pow2", "8_5", "4_3", "9_8", "uniform"])
+    @pytest.mark.parametrize("bs", [64, 128, 256])
+    @pytest.mark.parametrize("mml", [4096, 5000])
+    def test_every_preset_bucket_is_a_whole_number_of_blocks(self, monkeypatch, ladder, bs, mml):
+        # max_model_len itself need not be block-aligned.
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", ladder)
+        envs.clear_env_cache()
+        b = SpyreAttnBucketer(make_config(max_model_len=mml, block_size=bs))
+        assert all(kv % bs == 0 for kv in b.kv_buckets[:-1])
 
     def test_the_presets_are_ordered_by_bucket_count_and_mean_overpay(self, monkeypatch):
-        """Denser presets cost more buckets and pad less on average.
-
-        Aggregates only: the presets are not supersets of each other, so a denser one
-        can lack a bucket a coarser one has (8_5 has 2688, 4_3 does not).
-        """
+        # Aggregates only: the presets are not supersets (8_5 has 2688, 4_3 does not).
         counts, overpay = [], []
         for name in ("pow2", "8_5", "4_3", "9_8"):
             monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", name)
@@ -209,6 +230,12 @@ class TestBuckets:
         envs.clear_env_cache()
         with pytest.raises(ValueError, match="8_5"):
             SpyreAttnBucketer(make_config())
+
+    def test_explicit_buckets_skip_the_ladder_name(self, monkeypatch):
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "7_4")
+        monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "256,1024")
+        envs.clear_env_cache()
+        assert SpyreAttnBucketer(make_config(max_model_len=4096)).kv_buckets == [256, 1024, 4096]
 
     def test_explicit_buckets_still_win_over_a_preset(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "9_8")
@@ -263,7 +290,7 @@ class TestFindBucket:
         assert bucketer.find_query_bucket(512) == 512
 
     def test_rounds_up(self, bucketer):
-        assert bucketer.find_kv_bucket(257) == 384
+        assert bucketer.find_kv_bucket(257) == 512
         assert bucketer.find_query_bucket(33) == 512
 
     def test_query_len_one_maps_to_decode_bucket(self, bucketer):

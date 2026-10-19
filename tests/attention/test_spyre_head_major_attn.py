@@ -175,8 +175,7 @@ def _run_head_major_attn_test(
     from vllm.config import get_current_vllm_config
 
     max_num_blocks_per_seq = (max(kv_lens) + block_size - 1) // block_size
-    # The num_blocks ladder is derived from block_size, so the bucketer needs this
-    # test's value rather than the fixture default or it pads to the wrong width.
+    # The bucketer must see this test's block_size, not the fixture default.
     bucketer_config = get_current_vllm_config()
     bucketer_config.cache_config.block_size = block_size
     buckets = SpyreAttnBucketer(bucketer_config).num_blocks_buckets
@@ -701,8 +700,7 @@ def test_head_major_matches_token_major(
     from vllm.config import get_current_vllm_config
 
     blocks_per_seq = (max(kv_lens) + block_size - 1) // block_size
-    # The num_blocks ladder is derived from block_size, so the bucketer needs this
-    # test's value rather than the fixture default or it pads to the wrong width.
+    # The bucketer must see this test's block_size, not the fixture default.
     bucketer_config = get_current_vllm_config()
     bucketer_config.cache_config.block_size = block_size
     buckets = SpyreAttnBucketer(bucketer_config).num_blocks_buckets
