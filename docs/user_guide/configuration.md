@@ -145,6 +145,23 @@ llm = LLM(
 `1` and `8` cover decode steps (one token per running sequence, up to 8); `512` is the
 prefill bucket.
 
+The default prefill bucket is 512 tokens, but larger ones compile. For prompts of many
+thousands of tokens, a 1024-token prefill chunk shortens time to first token, on dense
+models such as granite-3.3-8b as well as on MoE models such as gemma-4, where each
+prefill step reads every expert's weights however many tokens it carries.
+Keep `512` in the list so short prefills don't pad to 1024:
+
+```bash
+vllm serve google/gemma-4-26B-A4B -tp 4 --max-model-len 32768 \
+    --max-num-batched-tokens 1024 \
+    --compilation-config '{"compile_sizes": [1, 2, 4, 512, 1024]}'
+```
+
+Warmup takes longer, and for prompts under a few thousand tokens it gains little; decode
+can get slightly slower. At a long `--max-model-len`, a 2048-token bucket can push the
+largest attention variants past torch-spyre's 60 s backend compile limit at warmup, so
+they are left to compile on first use (torch-spyre#5250 makes that limit configurable).
+
 **Attention (KV length × query length).** Set the buckets directly as comma-separated
 lists. Each is clamped to its limit: entries above `--max-model-len` (KV) or
 `--max-num-batched-tokens` (query) are dropped, and the limit is appended if missing, so
