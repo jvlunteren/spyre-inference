@@ -148,13 +148,13 @@ prefill bucket.
 The default prefill bucket is 512 tokens, but larger ones compile. For prompts of many
 thousands of tokens, a 1024-token prefill chunk shortens time to first token, on dense
 models such as granite-3.3-8b as well as on MoE models such as gemma-4, where each
-prefill step reads every expert's weights however many tokens it carries.
-Keep `512` in the list so short prefills don't pad to 1024:
+prefill step reads every expert's weights however many tokens it carries. Pass a larger
+`--max-num-batched-tokens` to get one; the default buckets then keep `512` too, so short
+prefills don't pad up to the larger one:
 
 ```bash
 vllm serve google/gemma-4-26B-A4B -tp 4 --max-model-len 32768 \
     --max-num-batched-tokens 1024 \
-    --compilation-config '{"compile_sizes": [1, 2, 4, 512, 1024]}' \
     --limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}'
 ```
 
