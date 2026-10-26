@@ -33,20 +33,21 @@ from torch._inductor.exc import InductorError
 _ATOL, _RTOL = 1e-2, 2e-3
 
 
-def reference_gemma_rms_norm(
+def reference_rms_norm(
     x: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
     residual: torch.Tensor | None = None,
+    gemma: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """CPU mirror of ``GemmaRMSNorm.forward_native``.
+    """CPU mirror of ``RMSNorm.forward_native``, or ``GemmaRMSNorm``'s when ``gemma``.
 
-    Gemma differs from plain RMSNorm twice: the weight enters as ``1 + w``, and it is
-    promoted to fp32 before the multiply. The reduction and the residual add accumulate
-    in fp32 and only the result is cast back.
+    Gemma's weight enters as ``1 + w``. Both promote the weight to fp32 before the
+    multiply, and the reduction and the residual add accumulate in fp32; only the result
+    is cast back.
     """
     orig_dtype = x.dtype
-    gemma_weight = weight.float() + 1.0
+    weight = weight.float() + 1.0 if gemma else weight.float()
     x = x.float()
     residual_out = None
     if residual is not None:
@@ -54,7 +55,7 @@ def reference_gemma_rms_norm(
         residual_out = x.to(orig_dtype)
     variance = x.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + eps)
-    normed = (x * gemma_weight).to(orig_dtype)
+    normed = (x * weight).to(orig_dtype)
     return normed if residual is None else (normed, residual_out)
 
 
@@ -97,7 +98,7 @@ def test_spyre_gemma_rmsnorm_matches_reference(
     # wrongly shaped multiply.
     layer.weight.data = torch.randn(hidden_size, dtype=dtype)
 
-    expected = reference_gemma_rms_norm(x, layer.weight.data, eps, residual)
+    expected = reference_rms_norm(x, layer.weight.data, eps, residual, gemma=True)
 
     layer.to("spyre")
     actual = layer.forward_oot(x.to("spyre"), residual.to("spyre") if use_residual else None)
@@ -139,7 +140,7 @@ def test_spyre_gemma_rmsnorm_accumulates_the_variance_in_fp32(default_vllm_confi
     fp16_variance = x.pow(2).mean(dim=-1, keepdim=True)
     assert fp16_variance.isinf().any(), "input no longer overflows fp16; pick a larger scale"
     fp16_oracle = x * torch.rsqrt(fp16_variance + eps) * (weight + 1.0)
-    fp32_oracle = reference_gemma_rms_norm(x, weight, eps)
+    fp32_oracle = reference_rms_norm(x, weight, eps, gemma=True)
 
     layer.to("spyre")
     actual = layer.forward_oot(x.to("spyre")).cpu().float()
@@ -189,7 +190,7 @@ def test_gemma_rmsnorm_eager_support_is_fp32_only(default_vllm_config, dtype, us
     layer = GemmaRMSNorm(hidden_size, eps=eps).to(dtype)
     layer.weight.data = torch.randn(hidden_size, dtype=dtype)
 
-    expected = reference_gemma_rms_norm(x, layer.weight.data, eps, residual)
+    expected = reference_rms_norm(x, layer.weight.data, eps, residual, gemma=True)
 
     layer.to("spyre")
     actual = GemmaRMSNorm.forward_native(
@@ -228,18 +229,6 @@ def test_plain_rmsnorm_oot_dispatch(default_vllm_config):
 
     assert isinstance(layer, SpyreRMSNorm)
     assert layer._forward_method == layer.forward_oot
-
-
-def reference_rms_norm(x, weight, eps, residual=None):
-    orig_dtype = x.dtype
-    x = x.float()
-    residual_out = None
-    if residual is not None:
-        x = x + residual.float()
-        residual_out = x.to(orig_dtype)
-    x = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
-    normed = (x * weight.float()).to(orig_dtype)
-    return normed if residual is None else (normed, residual_out)
 
 
 @pytest.mark.rmsnorm
