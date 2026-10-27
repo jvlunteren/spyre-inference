@@ -165,26 +165,32 @@ dropping the higher entries removes variants from warmup at no serving cost.
 
 `SPYRE_ATTN_KV_LADDER` picks how finely the KV ladder subdivides, without having to write the
 buckets out. The default is `pow2`. Every preset keeps the powers of two, so a KV length's bucket
-can only move down relative to `pow2`, never up. Counts and overpay below are for block_size 128:
+can only move down relative to `pow2`, never up. The denser presets do not contain each other,
+though: at block_size 128, 2600 rounds to 2688 under `8_5` but to 2944 under `4_3`. Counts and
+overpay below are for block_size 128, at the `--max-model-len` each column names:
 
-| preset | spacing | buckets at 4096 / 16384 / 32768 | mean overpay vs the real KV length |
+| preset | spacing | buckets at 4096 / 16384 / 32768 | mean overpay at 4096 / 32768 |
 |---|---|---|---|
-| `pow2` (default) | powers of two only | 6 / 8 / 9 | 39% |
-| `8_5` | 8/5 ratio | 10 / 15 / 18 | 21% |
-| `4_3` | 4/3 ratio | 14 / 20 / 24 | 15% |
-| `9_8` | 9/8 ratio | 20 / 34 / 41 | 8% |
-| `uniform` | evenly spaced above a knee | 13 / 15 / 16 | 14% |
+| `pow2` (default) | powers of two only | 6 / 8 / 9 | 39% / 39% |
+| `8_5` | 8/5 ratio | 10 / 15 / 18 | 21% / 19% |
+| `4_3` | 4/3 ratio | 14 / 20 / 24 | 15% / 13% |
+| `9_8` | 9/8 ratio | 20 / 34 / 41 | 8% / 6% |
+| `uniform` | odd sixteenths of `--max-model-len` | 13 / 15 / 16 | 14% / 14% |
 
-Overpay is averaged over every KV length above `block_size`, so it describes a workload whose
-lengths are spread out. Warmup cost tracks the number of distinct recorded kernels, which rises
-with the bucket count. The ratio presets put their buckets at fixed token counts; `uniform`
-places them as fractions of `--max-model-len`, so its count stays flat as the context grows but
-its buckets move up with it. Match `--max-model-len` to your real lengths before choosing it.
+Overpay is the bucket over the real KV length, averaged over every KV length above `block_size`,
+so it describes a workload whose lengths are spread out. Warmup cost tracks the number of distinct
+recorded kernels, which rises with the bucket count. The ratio presets put their buckets at fixed
+token counts; `uniform` places them as fractions of `--max-model-len`, so its buckets move up with
+the context while its count stays roughly flat. Short contexts that are not a power of two are the
+exception: there the step rounds down to a whole block and adds a few buckets (16 at 2047 against
+12 at 2048). Match `--max-model-len` to your real lengths before choosing it.
 
 As a rule of thumb, a denser preset pays off with long KV lengths and large batches, because the
 saving is a number of KV tokens per sequence per decode step; at short lengths or a few sequences
-it buys little for its warmup. `8_5` is the recommended compromise, `9_8` the fastest when warmup
-time does not matter, and `pow2` the default because it has the shortest warmup.
+it buys little for its warmup. Once the block count exceeds one chunk of `32 // num_seqs` blocks,
+the batched-decode kernel also pads it up to whole chunks, which takes back part of a denser
+preset's saving below 32 sequences. `8_5` is the recommended compromise, `9_8` the fastest when
+warmup time does not matter, and `pow2` the default because it has the shortest warmup.
 
 If the KV lengths are known and clustered, `SPYRE_ATTN_KV_BUCKETS` beats every preset: put the
 buckets where the lengths actually are. A workload that sits on one power of two gains nothing

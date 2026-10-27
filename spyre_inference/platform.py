@@ -38,6 +38,8 @@ from vllm.platforms import PlatformEnum
 from vllm.platforms.cpu import CpuPlatform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
+from spyre_inference import envs
+
 if TYPE_CHECKING:
     # NB: We can't eagerly import many things from vllm since vllm.config
     # will import this file. These would lead to circular imports
@@ -174,8 +176,6 @@ class TorchSpyrePlatform(CpuPlatform):
     @classmethod
     def _decoder_backend_path(cls) -> str:
         """The decoder attention backend for the requested KV cache layout."""
-        from spyre_inference import envs
-
         layout = envs.SPYRE_ATTN_KV_LAYOUT
         if layout not in cls._KV_LAYOUTS:
             raise ValueError(f"SPYRE_ATTN_KV_LAYOUT={layout!r} is not one of {cls._KV_LAYOUTS}.")
@@ -740,8 +740,6 @@ class TorchSpyrePlatform(CpuPlatform):
             )
 
         # Validate the ladder name now; the bucketer only reads it in the worker, after model load.
-        from spyre_inference import envs
-
         if not envs.SPYRE_ATTN_KV_BUCKETS:
             from spyre_inference.v1.attention.spyre_attn_bucketer import kv_ladder
 
@@ -754,7 +752,7 @@ class TorchSpyrePlatform(CpuPlatform):
         configure_threading(parallel_config.world_size)
 
         # ---- worker ----
-        from spyre_inference import envs, pin_model_runner
+        from spyre_inference import pin_model_runner
         from spyre_inference.v1.worker.spyre import triton_gate
 
         # Read fresh, not from the cache register() filled, so a value changed after

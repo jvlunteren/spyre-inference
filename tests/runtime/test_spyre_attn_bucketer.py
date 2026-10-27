@@ -231,6 +231,13 @@ class TestBuckets:
         with pytest.raises(ValueError, match="8_5"):
             SpyreAttnBucketer(make_config())
 
+    def test_a_block_size_too_small_for_the_ratio_is_rejected_not_looped_on(self, monkeypatch):
+        # At 9/8, v * 9 // 8 == v for v < 8: the series would never reach max_model_len.
+        monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "9_8")
+        envs.clear_env_cache()
+        with pytest.raises(ValueError, match="block_size=5"):
+            SpyreAttnBucketer(make_config(max_model_len=4096, block_size=5))
+
     def test_explicit_buckets_skip_the_ladder_name(self, monkeypatch):
         monkeypatch.setenv("SPYRE_ATTN_KV_LADDER", "7_4")
         monkeypatch.setenv("SPYRE_ATTN_KV_BUCKETS", "256,1024")

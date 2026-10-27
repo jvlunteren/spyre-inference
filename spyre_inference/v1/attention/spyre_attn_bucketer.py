@@ -133,6 +133,13 @@ _KV_LADDER_GRAIN_HORIZON = 32768
 
 def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator: int) -> list[int]:
     def _series(grain: int, limit: int) -> list[int]:
+        # A seed this small maps onto itself under v * numerator // denominator, so the loop
+        # below would never end. Only a block_size the platform rejects gets here.
+        if grain * (numerator - denominator) < denominator:
+            raise ValueError(
+                f"block_size={block_size} is too small for the {numerator}_{denominator} KV "
+                "ladder: its series would never grow."
+            )
         out = []
         v = grain
         while (v := v * numerator // denominator) < limit:
@@ -140,7 +147,8 @@ def _geometric_union_up_to(n: int, block_size: int, numerator: int, denominator:
                 out.append(r)
         return out
 
-    # A 64-token grain leaves some buckets off whole blocks from block_size 128 upward.
+    # The 64-token grain survives only if all its buckets up to the horizon are whole blocks;
+    # otherwise the series is reseeded at block_size, a different series, not a coarser one.
     grain = 64
     if any(r % block_size for r in _series(grain, _KV_LADDER_GRAIN_HORIZON)):
         grain = block_size
@@ -277,8 +285,8 @@ class SpyreAttnBucketer:
             lambda: sorted({1, *range(step, max_batched + 1, step), max_batched}),
         )
 
-        # Default: the SPYRE_ATTN_KV_LADDER preset. Geometric because the recorded set
-        # is a product of both axes; the extra padding each bucket costs is absorbed by the mask.
+        # Default: the SPYRE_ATTN_KV_LADDER preset. Sparse because the recorded set is a
+        # product of both axes; the extra padding each bucket costs is absorbed by the mask.
         self._kv_buckets: list[int] = _resolve_buckets(
             envs.SPYRE_ATTN_KV_BUCKETS,
             max_model_len,
