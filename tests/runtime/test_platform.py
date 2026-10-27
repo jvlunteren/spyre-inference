@@ -778,8 +778,31 @@ def test_compile_sizes_default_honors_a_user_budget(monkeypatch, budget, user_bu
     assert vllm_config.scheduler_config.max_num_batched_tokens == sizes[-1]
 
 
-@pytest.mark.parametrize(("flag", "budget"), [(None, 512), (1024, 1024)])
-def test_engine_args_budget_reaches_the_scheduler(monkeypatch, flag, budget):
+@pytest.mark.parametrize(("budget", "expect_warn"), [(1024, False), (2048, True)])
+def test_compile_sizes_warns_above_twice_the_default(monkeypatch, caplog, budget, expect_warn):
+    import logging
+
+    from spyre_inference.platform import TorchSpyrePlatform
+
+    monkeypatch.setattr(TorchSpyrePlatform, "_user_max_num_batched_tokens", budget)
+    vllm_config = _defaults_config(enforce_eager=False, mode=None)
+    vllm_config.compilation_config.compile_sizes = None
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = budget
+
+    with caplog.at_level(logging.WARNING, logger="spyre_inference.platform"):
+        caplog.clear()
+        TorchSpyrePlatform.apply_config_platform_defaults(vllm_config)
+
+    assert vllm_config.compilation_config.compile_sizes == [1, 2, 4, 512, budget]
+    warned = any("torch-spyre#5250" in r.message for r in caplog.records)
+    assert warned == expect_warn
+
+
+@pytest.mark.parametrize(
+    ("flag", "budget", "sizes"), [(None, 512, [512]), (1024, 1024, [512, 1024])]
+)
+def test_engine_args_budget_reaches_the_scheduler(monkeypatch, flag, budget, sizes):
     """Through EngineArgs: an omitted flag keeps the default, a passed one is honored."""
     from vllm.engine.arg_utils import EngineArgs
 
@@ -791,6 +814,7 @@ def test_engine_args_budget_reaches_the_scheduler(monkeypatch, flag, budget):
     ).create_engine_config()
 
     assert vllm_config.scheduler_config.max_num_batched_tokens == budget
+    assert vllm_config.compilation_config.compile_sizes[-len(sizes) :] == sizes
 
 
 def test_compile_sizes_empty_list_opts_out():
