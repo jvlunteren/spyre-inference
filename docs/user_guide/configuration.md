@@ -145,6 +145,26 @@ llm = LLM(
 `1` and `8` cover decode steps (one token per running sequence, up to 8); `512` is the
 prefill bucket.
 
+The default prefill bucket is 512 tokens, but larger ones compile. For prompts of many
+thousands of tokens, a 1024-token prefill chunk shortens time to first token, on dense
+models such as granite-3.3-8b as well as on MoE models such as gemma-4, where each
+prefill step reads every expert's weights however many tokens it carries. Pass a larger
+`--max-num-batched-tokens` to get one; the default buckets then keep `512` too, so short
+prefills don't pad up to the larger one:
+
+```bash
+vllm serve google/gemma-4-26B-A4B -tp 4 --max-model-len 32768 \
+    --max-num-batched-tokens 1024 \
+    --limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}'
+```
+
+Warmup takes longer, and for prompts under a few thousand tokens it gains little; decode
+can get slightly slower. The example serves text only: a larger token budget also raises
+the number of image-batch widths the vision tower is warmed at, which can run out of
+device memory (#1302). At a long `--max-model-len`, a 2048-token bucket can push the
+largest attention variants past torch-spyre's 60 s backend compile limit at warmup, so
+they are left to compile on first use (torch-spyre#5250 makes that limit configurable).
+
 **Attention (KV length × query length).** Set the buckets directly as comma-separated
 lists. Each is clamped to its limit: entries above `--max-model-len` (KV) or
 `--max-num-batched-tokens` (query) are dropped, and the limit is appended if missing, so
@@ -187,6 +207,19 @@ The scales are compiled into the graphs as constants. A checkpoint whose layers 
 different KV scales therefore compiles the transformer block and each recorded attention
 kernel once per distinct pair of scales, which lengthens warmup; one without scales
 compiles them once, as an fp16 cache does.
+
+## Offline engine in the calling process
+
+At `tensor_parallel_size=1`, set `VLLM_ENABLE_V1_MULTIPROCESSING=0` to run the offline
+`LLM` engine in the calling process instead of a spawned EngineCore, which skips the
+spawn and the second round of imports at startup. `vllm serve` always spawns EngineCore.
+
+The engine then changes the calling process: vLLM freezes the garbage collector's heap,
+caches its environment variables, seeds the global RNGs and leaves `RANK`/`WORLD_SIZE`
+set, the worker sets torch's thread count, and the card stays open until the process
+exits. Build an engine with `tensor_parallel_size > 1` in a new process. Set
+`OMP_WAIT_POLICY=PASSIVE` before Python starts: OpenMP reads it when it loads, so the
+default the plugin sets only reaches spawned processes.
 
 ## pyproject.toml Reference
 
